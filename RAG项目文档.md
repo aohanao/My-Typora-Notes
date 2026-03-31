@@ -1,28 +1,37 @@
-# 面向 CAE 仿真领域的智能问答系统 (RAG)
+# 面向 CAE 仿真领域的RAG智能问答系统
 
 ## 📌 项目背景与简介
 
-本项目是一个专注于计算机辅助工程 (CAE) 领域的检索增强生成 (RAG) 系统。针对传统工程仿真领域文献中存在大量复杂公式、专业术语密集、知识检索困难等痛点，构建了一套完整的智能客服与知识库助手。
+本项目是专为 **计算机辅助工程 (CAE)** 领域打造的检索增强生成 (RAG) 系统。针对工程文献中**公式密集、术语生僻、上下文指代模糊**等痛点，通过 **Marker 深度解析**、**双路混合检索**与**多轮对话查询重写**技术，构建了一个严谨的仿真专家助手。
 
 ## 🏗️ 项目核心架构
 
-整个系统分为“离线数据入库”与“在线检索问答”两条主链路：
+系统由 **离线知识处理** 与 **在线智能问答** 两大引擎组成：
 
-1. **知识库构建 (Offline Pipeline)**：支持 PDF/Markdown 格式的工程文献上传。针对 CAE 文献包含大量数学公式的特点，引入 Marker 进行深度解析；配合 MD5 校验防重、Markdown 结构化分块，最终存入 Chroma 向量数据库。  
-2. **混合检索问答 (Online Pipeline)**：采用 `向量检索 (Chroma)` + `稀疏检索 (BM25)` 的双路召回策略，通过 RRF (倒数排名融合) 算法合并结果，最后使用 `BGE-Reranker` 交叉编码器进行深度语义重排。大模型基于 LangChain LCEL 链介入，结合本地持久化的历史会话提供流式解答。
+1. **离线：高保真数据入库 (Offline Pipeline)**
+
+- **深度文档解析**：集成 `Marker` 模型，将 PDF 转化为带 LaTeX 公式（`$$`）和结构化标题（`#`）的 Markdown 格式。
+- **双重切片策略**：先用 `MarkdownHeaderTextSplitter` 进行语义级段落切分（保留 H1-H3 标题元数据），再用 `RecursiveCharacterTextSplitter` 结合公式占位符（`\n$$\n`）进行长度兜底。
+- **幂等性保障**：引入 MD5 哈希校验机制，确保重复文档不被重复向量化，节省 Token 消耗。
+
+2. **在线：上下文感知检索链 (Online Pipeline)**
+
+- **查询重写 (Query Rewrite)**：利用 Qwen 大模型结合历史会话，将用户的模糊追问（如“它怎么设？”）重写为独立的专业搜索词（如“Abaqus C30 混凝土弹性模量设置”）。
+- **混合召回 (Hybrid Retrieval)**：
+  - **密集检索**：Chroma 向量库捕捉语义相关性。
+  - **稀疏检索**：Jieba 分词 + BM25Okapi 算法实现专业术语的精准匹配。
+- **深度重排 (Reranking)**：通过 **RRF (倒数排名融合)** 算法合并两路结果，并使用 `BGE-Reranker` 交叉编码器进行 Top-10 到 Top-3 的精选压滤，极大降低幻觉率。
 
 ## 🛠️ 技术栈选型
 
-- **前端交互**：Streamlit (聊天界面 `app.py`、文档管理 `file_uploader.py`)
-- **大模型框架**：LangChain (LCEL 编排、历史记录管理、文档处理)
-- **语言模型 & 向量模型**：阿里云百炼 DashScope (`qwen-turbo`、`text-embedding-v4`)
+- **前端交互**：Streamlit (聊天界面 `app.py`、文档上传 `file_uploader.py`)
+- **大模型框架**：LangChain
+- **模型选型**：阿里云百炼 DashScope (`qwen-turbo`、`text-embedding-v4`)
 - **文档解析**：Marker CLI (专门解决 PDF 复杂数学公式与多栏排版解析难题)
 - **检索与重排**：ChromaDB (向量库), Jieba + BM25Okapi (关键词检索), Sentence-Transformers (`BAAI/bge-reranker-base`)
 - **工程化部署**：Docker, Docker Compose
 
 ## 📂 项目目录结构
-
-Plaintext
 
 ```
 CAE_RAG_project/
@@ -38,16 +47,19 @@ CAE_RAG_project/
 ├── file_history_store.py # 会话管理：继承 LangChain BaseChatMessageHistory 的本地文件存储实现
 ├── knowledge_base.py     # 知识入库：封装 Chunking (按 Markdown 标题降级切分) 与 Embedding 逻辑
 ├── rag.py                # RAG 核心链：基于 LCEL 构建带记忆的生成流水线
-├── retriever_service.py  # 检索引擎：双路召回 (Dense + Sparse) + RRF 融合 + BGE 重排的完整实现
+├── retriever_service.py  # 检索引擎：双路召回 + RRF 融合 + BGE 重排的完整实现
 ├── Dockerfile / docker-compose.yml / .dockerignore # 容器化部署文件
+├── README.md # 使用说明文档
 └── requirements.txt      # 依赖环境清单
 ```
 
-## 🚀 核心模块与技术亮点 
+## 核心模块与技术亮点 
+
+### 核心模块：
 
 1. **针对 CAE 领域的专业文档解析引擎 (`file_uploader.py` & `knowledge_base.py`)**
 
-- **痛点**：传统的 PyPDF 或 pdfplumber 无法准解析工程文献中的跨页表格和流体力学/固体力学公式。
+- **痛点**：传统的 PyPDF 或 pdfplumber 无法准确解析工程文献中的跨页表格和流体力学/固体力学公式。
 - **解决方案**：集成 `Marker` 模型进行深度解析，将 PDF 高保真还原为 Markdown 格式，保留 `$$` 包裹的 LaTeX 公式和层级标题。
 - **智能切片策略**：采用双重分块机制。优先使用 `MarkdownHeaderTextSplitter` 按 `H1/H2/H3` 逻辑段落进行语义切分，防止上下文割裂；针对超长段落，兜底使用 `RecursiveCharacterTextSplitter` 进行字符级长度限制。
 - **工程鲁棒性**：实现基于 MD5 的文档去重机制，避免重复 Embedding 消耗 Token ；上传解析过程支持实时子进程日志输出，并包含临时文件自动清理机制。
@@ -68,6 +80,55 @@ CAE_RAG_project/
 - **自定义历史记忆机制**：放弃了依赖内存的 `ChatMessageHistory`，自己实现 `FileChatMessageHistory` 将 `session_id` 映射到本地 JSON 文件，实现了跨会话、防重启的多轮对话上下文追踪。
 - **流式输出 (Streaming)**：无缝对接 Streamlit 的 `st.write_stream`，提供打字机式的极致用户体验。
 
+### 亮点的详细阐述：
+
+#### 一、 Marker 的底层工作流：Surya 之后发生了什么？
+
+你可以把 Marker 理解为一个**“流水线（Pipeline）”**或者**“混合专家系统（MoE 思想在文档解析上的应用）”**。在 Surya 完成了“圈地（版面分析）”之后，Marker 会对不同的“地块”进行分类处理：
+
+1. **第一步：Surya 版面分析与阅读顺序（Layout & Reading Order）**
+   - Surya 利用视觉模型，在文档图像上画出一个个边界框（Bounding Boxes），并打上标签：这是“正文”、那是“标题”、这是“表格”、那是“公式”、这是“图片”。
+   - 同时，Surya 会计算出人类视角的**阅读顺序**（比如双栏排版时，知道先读左列再读右列，而不是直接横着切断）。
+2. **第二步：任务路由与专业模型解析（Routing & Extraction）**
+   - **对于纯文本块（Text/Title）：** Marker 会提取底层 PDF 的原生字符流，或者调用高精度的 OCR 模型（如 Surya-OCR）提取文字，并修正换行符和拼写错误。
+   - **对于公式块（Equation）：** 这是传统工具的死穴。Marker 会将公式区域的图像裁剪下来，送给专门的**数学公式识别模型**（例如 Texify 或类似 Nougat 的视觉模型），直接将其翻译成标准的 LaTeX 代码（如 `$E=mc^2$`）。
+   - **对于表格块（Table）：** Marker 会调用表格结构识别（Table Structure Recognition）算法。不仅识别表格里的字，还能识别出网格线、合并单元格，然后将其重构成 Markdown 格式的表格（`| Header | Header |`）。
+3. **第三步：Markdown 拼装与启发式清洗（Assembly & Post-processing）**
+   - 最后，Marker 会根据第一步得出的阅读顺序，把文本、LaTeX 公式、Markdown 表格像拼乐高一样拼装起来，并利用启发式规则清洗掉多余的空格、页眉页脚，最终输出一份极其干净、**对大模型（LLM）极其友好**的 Markdown 文档。
+
+------
+
+#### 二、 为什么不用传统工具？(竞品对比分析)
+
+在面试中，踩一捧一（有理有据地踩）是展现技术深度的最好方式。
+
+| **解析工具**          | **核心原理**                                          | **致命缺点 (在 CAE 场景下)**                                 | **对大模型 (LLM) 的友好度**                                  |
+| --------------------- | ----------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **PyPDF / PyPDF2**    | 基于 PDF 底层代码流提取文本。                         | **无视觉概念。** 遇到双栏排版会直接跨栏读取造成语句错乱；**遇到公式会变成乱码符号**；表格会变成一堆没有结构的散字。 | 极差（全是噪音和乱码）。                                     |
+| **pdfplumber**        | 基于字符的物理坐标（X,Y）进行提取。                   | 提取规则死板。**无法处理扫描版 PDF**；对于没有边框线的表格（三线表），经常无法正确还原行列关系；同样无法理解复杂公式。 | 较差（表格提取勉强可用，但公式依然无解）。                   |
+| **Unstructured**      | 综合性极强的解析管道，融合了规则和 YOLOX 等视觉模型。 | **过于庞大且通用。** 它的目标是输出 JSON 元素列表，将其转化为干净 Markdown 的后续成本较高。在“公式转 LaTeX”这一细分领域的开箱即用效果不如 Marker。 | 良好（但需要较多二次开发）。                                 |
+| **Marker (你的方案)** | **端到端的视觉+专有模型。**                           | 处理速度相对较慢（因为需要跑深度学习模型，占用 GPU 资源）。  | **极佳**（直接输出带标题树、表格、LaTeX 公式的结构化 Markdown）。 |
+
+------
+
+#### 三、 面试实战话术：“为什么选 Marker？”
+
+当面试官问出“为什么要选这个模型，而不用 PyPDF 或者 pdfplumber？”时，你可以这样回答：
+
+> “其实在项目初期，我也尝试过像 PyPDF 和 pdfplumber 这样的传统解析库，但在我们的 **CAE 仿真业务场景**下，它们根本走不通，原因有三个：
+>
+> **第一是公式的灾难性破坏。** CAE 仿真手册里充满了大量的偏微分方程和张量推导公式。传统的 PyPDF 提取出来全是不可读的乱码，大模型根本无法理解。而 Marker 内部集成了专用的数学公式识别模型，能把复杂的公式精准转化为 **LaTeX 格式**，保留了完整的数学语义。
+>
+> **第二是复杂表格的结构丢失。** 我们的文档里有很多材料参数表，甚至有‘表头合并’的嵌套表格。pdfplumber 虽然能基于线框提取表格，但对没有边框的三线表极易失效。Marker 通过视觉表格重建，能无损转化为 Markdown 表格，让大模型准确对应数据和表头。
+>
+> **第三是多栏排版的上下文割裂。** 很多学术手册是双栏甚至三栏排版。传统工具是按 Y 轴硬扫，会导致左边半句话和右边半句话拼在一起。Marker 前置的 Surya 模型能极其精准地分析出人类的**阅读顺序（Reading Order）**。
+>
+> **总结来说**，传统工具只是在‘提取字符’，而大模型 RAG 需要的是‘结构化知识’。Marker 输出的带有清晰层级（H1, H2）和排版的 Markdown 文档，能让后续的 Chunking（语义切块）变得极其精准，直接从数据供给侧把 RAG 的质量拉高了一个层级。这是我最终选择它的原因。”
+
+**核心技巧：** 回答这个问题时，不要只谈纯粹的计算机理论，**一定要把话题拉回你的“土木工程/CAE”老本行**。提到“偏微分方程”、“材料参数表”，面试官立刻就会觉得：“这小伙子是真正结合业务痛点在做技术选型，而不是为了用大模型而用大模型。”
+
+## 代码解读
+
 ### 第一部分：CAE_RAG_project 现有代码深度拆解
 
 为了能在面试中应对任何深挖，你需要对每一个调用的类和每一段逻辑的“为什么（Why）”了如指掌。
@@ -78,7 +139,7 @@ CAE_RAG_project/
 
 这个文件是全量配置字典。它的存在使得项目避免了“硬编码（Hardcode）”，是非常规范的工程化做法。
 
-- **环境变量注入**：通过 `os.environ` 配置了阿里云百炼的 `DASHSCOPE_API_KEY` 和兼容 OpenAI 的 Base URL。这使得你可以无缝切换任何支持 OpenAI 格式的开源模型。
+- **环境变量注入**：通过 `os.environ` 配置了阿里云百炼的 `DASHSCOPE_API_KEY` 和兼容 `OpenAI` 的 `Base URL`。这使得你可以无缝切换任何支持 OpenAI 格式的开源模型。
 - **分块策略（Chunking Strategy）参数**：
   - `chunk_size = 1000`, `chunk_overlap = 100`：经典的滑动窗口切分法。Overlap 保证了上下文在边界处不会断裂。
   - `separators`：特别注意你包含了 `\n$$\n` 和 `$$`。这是**极具含金量**的细节，说明你专门针对 CAE 领域论文中的 LaTeX 数学公式做了防截断处理，保证公式在向量库中的完整性。
@@ -93,7 +154,7 @@ CAE_RAG_project/
 - **混合切片刀法（双重 Splitter）**：
   - **第一刀（语义级）**：`MarkdownHeaderTextSplitter`。因为上游（Marker）输出了带有 `#` 的结构化 Markdown，这个切分器能保留父级标题。例如，某个片段会自带 Metadata `{"Header_H2": "材料本构模型"}`，这在后续 RAG 溯源时极具价值。
   - **第二刀（物理级兜底）**：`RecursiveCharacterTextSplitter`。如果某个标题下的段落依然超过了 1000 字符，这就起到兜底作用，防止超大 Chunk 撑爆大模型的上下文窗口。
-- **Chroma 向量化入库**：调用 `DashScopeEmbeddings` 生成文本的高维向量表示，并附加自定义元数据（如 `source`, `create_time`, `operator`），写入本地 `persist_directory`。
+- **Chroma 向量化入库**：调用 `DashScopeEmbeddings` 生成文本的高维向量表示，并附加自定义元数据（如 `source`, `create_time`, `operator`,`chunk_index`），写入本地 `persist_directory`。
 
 #### 3. 多轮对话记忆中枢：`file_history_store.py`
 
@@ -123,11 +184,29 @@ CAE_RAG_project/
 
 将检索器、记忆组件和大模型组装成一条自动化的 LCEL 流水线。
 
-- **LCEL (LangChain Expression Language) 链式组装**：
-  - `RunnablePassthrough` 获取用户当前输入。
-  - `RunnableLambda(extract_query) | perform_retrieval | format_document`：这组管道将用户问题丢入上一节的混合检索器，并将返回的 `Document` 对象格式化为带来源的纯文本结构。
-- **Prompt 模板工程**：强约束系统 Prompt（“必须完全基于参考资料...禁止编造...提取来源标签”），有效抑制了 LLM 在 CAE 领域的幻觉。结合了 `MessagesPlaceholder("history")` 用于将历史记录注入。
-- **RunnableWithMessageHistory**：终极封装器，自动劫持大模型的输入和输出，将其自动更新到 `file_history_store` 的本地 JSON 中。
+- **多功能 LCEL 链式组装（Nested Chains）**
+
+  - **rewrite_chain（重写分支）**：这是一个独立的子链，专门负责将模糊的对话（如“那这个参数怎么设？”）转化为具体的检索词（如“LS-DYNA 中 MAT_024 材质模型的密度参数设置”）。
+
+  - **RunnablePassthrough.assign**：这是本次更新的高级用法。它允许我们在不破坏原始 `input` 数据的同时，动态地在管道流中添加 `rewritten_query` 和 `context` 两个新变量。
+
+- **上下文压缩与检索优化**
+
+  - **智能检索词提取**：通过 `rewrite_prompt` 强迫大模型扮演 CAE 专家，结合 `history` 占位符，确保检索动作是基于全量对话信息的。
+
+  - **perform_retrieval (精排逻辑)**：在流水线内嵌入了 `search_and_rerank`，实现了从 10 个候选文档中精选 3 个的操作，极大地提升了上下文的信噪比。
+
+- **结构化文档格式化（Format Metadata）**
+  - **溯源强化**：`format_document` 不再只是提取内容，它还自动解析 `Metadata`（如文件名、H1/H2 标题），生成的参考资料带有明显的 `[参考资料 n] (来源: xxx | 章节: xxx)` 标签，直接支撑了后续 Prompt 中的来源提取要求。
+
+- **两阶段 Prompt 工程**
+
+  - **重写 Prompt**：侧重于“术语转换”和“去模糊化”。
+
+  - **QA Prompt**：侧重于“严谨性”和“逻辑推理”。特别新增了对**表格/离散数据**的推理授权，这在处理 CAE 仿真参数表时非常关键，弥补了纯语义检索的不足。
+
+- **透明化调试监控**
+  - 引入了 `print_rewritten_query` 和 `print_prompt` 两个辅助函数。在 LCEL 中，它们作为中间件（Middleware）存在，能让你在控制台实时看到“模型到底把我的话改成了什么”以及“最后喂给模型的内容长什么样”，是生产环境排查幻觉的利器。
 
 #### 6. 前端展示与交互层：`app.py` & `file_uploader.py`
 
@@ -197,13 +276,239 @@ CAE_RAG_project/
   - **任务分解**，利用 Step-back 或子查询拆解，将一个复杂问题拆分为多个简单的、粒度更细的检索单元
   - **上下文补全**，进行指代消解与查询压缩，将多轮历史信息“脱水”，形成独立完整的语句
 - **难点**：
-  - **响应延迟**，改写增加LLM调用导致TTFT变长，可
-  - **查询漂移**，改写后偏离原意，导致召回无关内容，可
-  - **成本开销**，每条请求多消耗Token，增加运营负担，可
+  - **响应延迟**，改写增加LLM调用导致TTFT变长
+  - **查询漂移**，改写后偏离原意，导致召回无关内容
+  - **成本开销**，每条请求多消耗Token，增加运营负
+
+## 评估板块
+
+你需要从以下**三个核心维度**对你的系统建立监控和测评：
+
+#### 1. 响应延迟测评 (Latency / System Profiling)
+
+- **TTFT (Time To First Token)：**用户发问后，流式输出打出第一个字的耗时。
+- **Retrieval Time：**检索器从 Chroma + BM25 中召回 Document 的耗时（混合检索通常会增加几百毫秒延迟）。
+- **Embedding Time：**上传文档时的处理速度（即我们刚才打点的部分）。
+
+#### 2. 检索质量测评 (Retrieval Evaluation)
+
+- **Context Precision (上下文精度)：**召回的 Top-3 片段中，到底有多少是真正包含答案的？还是召回了一堆干扰信息？
+- **Context Recall (上下文召回率)：**为了回答某个问题所需的所有前提条件，你的系统都成功找齐了吗？（这对于隧道施工这种多工序、强关联的知识点极其重要）。
+
+#### 3. 生成质量测评 (Generation Evaluation)
+
+- **Faithfulness (忠实度/幻觉率)：**大模型的回答，是否 100% 来源于你召回的参考资料？有没有自己胡编乱造隧道施工参数？
+- **Answer Relevance (回答相关性)：**回答有没有偏题？
+
+**🛠️ 测评工具推荐：** 你可以了解一下 **RAGAS (RAG Assessment)** 或者 **TruLens**。这两个开源框架可以自动化地帮你计算上述所有指标，给你的系统打出一个雷达图分数。这会让你的项目（或论文）看起来具有极高的学术严谨性和工程落地价值！
+
+#### 📝 后续评估（Evaluation）该怎么做？
+
+既然你要做系统的测评评估，针对入库（Indexing）阶段，你可以记录并评估以下三个核心指标：
+
+1. **吞吐率 (Throughput)**
+   - **计算公式**：`处理总字数 / 总耗时 (total_time)`
+   - **意义**：评估你的系统每秒能处理多少字的知识入库（比如 5000字/秒）。这决定了未来如果给全量规程数据（比如上百本 PDF）建库需要多少小时。
+2. **切片合理性评估 (Chunk Quality)**
+   - **评测方法**：随机抽取入库的 50 个 `knowledge_chunks`，人工（或用 LLM 打分）评估：段落语义是否完整？有没有把一句话从中间截断？公式有没有被破坏？
+   - **优化点**：如果切出来的东西牛头不对马嘴，你就需要调整 `config.chunk_size` 和 `config.chunk_overlap`。
+3. **API 成本与并发瓶颈**
+   - **评测方法**：记录每次入库请求的 Token 消耗量。
+   - **瓶颈测试**：DashScope API 有 QPS（每秒请求数）和 TPM（每分钟 Token 数）限制。当上传超级大文件时，如果不做批处理（Batching）或者加延时（sleep），可能会触发阿里云的限流报错（HTTP 429 Too Many Requests）。
+
+### 第一步：构建“黄金测试集” (Ground Truth Dataset)
+
+评估的第一步，是你要和工作室的同学一起，人工整理出至少 **30~50 个**高质量的 QA 测试对。这些测试用例必须覆盖你们日常遇到的各种刁钻问题。
+
+在你的代码目录下新建一个 `eval_dataset.json`，格式如下。请注意，这里的例子结合了你正在深入的**藏区公路钻爆法隧道开挖与支护**方向：
+
+JSON
+
+```
+[
+  {
+    "question": "在藏区高寒高海拔环境下，钻爆法开挖隧道时，通风设备的配置有什么特殊要求？",
+    "ground_truth": "根据《高寒高海拔隧道施工规范》，必须考虑空气稀薄导致的制氧量下降和柴油机械燃烧不充分。通风设备配置需按常规平原地区的 1.3~1.5 倍计算风量，并配备长距离射流风机，同时需考虑防冻保温措施。",
+    "difficulty": "hard",
+    "type": "equipment_config"
+  },
+  {
+    "question": "Abaqus 里 Mohr-Coulomb 本构模型中，dilation angle（剪胀角）一般怎么取值？",
+    "ground_truth": "对于一般的岩石材料，剪胀角通常取内摩擦角的一部分，通常在 0 到内摩擦角之间。若岩体不考虑体积膨胀，可保守取值为 0。",
+    "difficulty": "medium",
+    "type": "cae_parameter"
+  }
+]
+```
+
+*提示：一定要包含 `ground_truth`（标准答案），这是后续让大模型裁判打分的唯一标尺。*
 
 ------
 
-## 🗣️ 面试模拟
+### 第二步：确立 RAG 评估的“四大金刚”指标
+
+业界目前最权威的评估框架是 **RAGAS**。它的核心就是从“检索”和“生成”两个维度，拆解出 4 个核心指标。你要在代码里让大模型裁判分别给这 4 项打分（0-5分）：
+
+#### 🔍 维度一：检索质量 (Retrieval Quality)
+
+1. **Context Precision (上下文精度)**：
+   - **白话**：系统捞出来的 top-3 文本块里，是不是全都是干货？有没有夹杂没用的废话？
+   - **低分表现**：捞出来的文献确实包含答案，但同时捞出来一堆毫不相干的章节。
+2. **Context Recall (上下文召回率)**：
+   - **白话**：为了完整回答“通风设备配置”这个问题，需要的约束条件（空气稀薄、1.3倍风量、防冻）有没有**全部**被捞出来？
+   - **低分表现**：漏掉了“防冻”这个关键信息，导致大模型只能回答出一半。
+
+#### 🧠 维度二：生成质量 (Generation Quality)
+
+1. **Faithfulness (忠实度 / 反幻觉指数)**：
+   - **白话**：大模型给出的回答，是不是 **100% 来源于**捞出来的参考资料？
+   - **致命错误**：如果参考资料里根本没提参数的具体数值，大模型自己凭借网上的记忆“编”了一个剪胀角数值，这项直接打 0 分（在工程仿真中，参数造假是灾难性的）。
+2. **Answer Relevance (回答相关性)**：
+   - **白话**：大模型有没有正面回答用户的问题？
+   - **低分表现**：用户问“怎么配置通风设备”，大模型长篇大论背诵了一段“通风的原理”，这就是答非所问。
+
+------
+
+### 第三步：编写自动化评估脚本 (`evaluator.py`)
+
+你可以直接在项目里新建一个 `evaluator.py`，专门用来跑批量的自动化测试。
+
+为了省钱且高效，**强烈建议你使用通义千问的 Qwen-Max 或者直接调用 OpenAI 的 GPT-4o-mini 作为裁判模型**（裁判必须比干活的模型更聪明）。
+
+这里是一个评估脚手架的代码结构，你可以直接拿去用：
+
+Python
+
+```python
+import json
+import time
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.chat_models import ChatTongyi
+from langchain_core.output_parsers import JsonOutputParser
+# 引入你写好的 RagService
+from rag import RagService 
+
+# 初始化裁判模型 (必须用最聪明的模型来当裁判，比如 qwen-max)
+judge_llm = ChatTongyi(model="qwen-max", temperature=0.0)
+
+# 定义裁判的打分 Prompt
+eval_prompt = ChatPromptTemplate.from_messages([
+    ("system", """你是一个严苛的 CAE 工程领域评估专家。
+请根据以下输入，评估 RAG 系统的表现，并严格输出 JSON 格式。
+
+【评估指标】
+1. Faithfulness (1-5分): 回答是否完全基于给定的检索内容，没有编造幻觉？
+2. Answer Relevance (1-5分): 回答是否直接解决了用户的问题？
+
+【输入数据】
+用户问题: {question}
+RAG 检索到的参考资料: {context}
+RAG 生成的回答: {answer}
+标准参考答案: {ground_truth}
+
+请输出严格的 JSON 格式：
+{{
+    "faithfulness_score": int,
+    "faithfulness_reason": "打分理由",
+    "relevance_score": int,
+    "relevance_reason": "打分理由"
+}}
+""")
+])
+
+eval_chain = eval_prompt | judge_llm | JsonOutputParser()
+
+def run_evaluation():
+    print("🚀 开始执行 RAG 系统自动化评估...")
+    rag_engine = RagService()
+    
+    # 1. 加载测试集
+    with open("eval_dataset.json", "r", encoding="utf-8") as f:
+        dataset = json.load(f)
+        
+    results = []
+    
+    for idx, item in enumerate(dataset):
+        print(f"\n--- 正在评估 Case {idx+1}/{len(dataset)} ---")
+        question = item["question"]
+        ground_truth = item["ground_truth"]
+        
+        # 2. 让你的 RAG 系统去作答！
+        # 注意：你需要稍微改造一下 rag_engine.chain 的输出，让它不仅返回答案，还能把你格式化好的 context 一并返回用于评估
+        response = rag_engine.chain.invoke({
+            "input": question,
+            # 评估时不需要历史记录，传入空列表
+            "history": [] 
+        }, config={"configurable": {"session_id": f"eval_{idx}"}})
+        
+        generated_answer = response["answer"]
+        retrieved_context = response["context"] # 假设你修改了 pipeline 暴露了 context
+        
+        print(f"✅ RAG 作答完毕，提交裁判模型打分...")
+        
+        # 3. 让大模型裁判打分
+        try:
+            eval_res = eval_chain.invoke({
+                "question": question,
+                "context": retrieved_context,
+                "answer": generated_answer,
+                "ground_truth": ground_truth
+            })
+            
+            # 合并结果
+            eval_res["question"] = question
+            results.append(eval_res)
+            
+            print(f"得分 -> 忠实度: {eval_res['faithfulness_score']}/5 | 相关性: {eval_res['relevance_score']}/5")
+            print(f"裁判点评: {eval_res['faithfulness_reason']}")
+            
+        except Exception as e:
+            print(f"❌ 裁判打分失败: {e}")
+            
+        time.sleep(1) # 防止 API 触发限流
+        
+    # 4. 汇总并保存评估报告
+    avg_faith = sum(r["faithfulness_score"] for r in results) / len(results)
+    avg_rel = sum(r["relevance_score"] for r in results) / len(results)
+    
+    print("\n" + "="*40)
+    print(f"📊 评估完成！总体战报：")
+    print(f"平均忠实度 (反幻觉): {avg_faith:.2f} / 5.0")
+    print(f"平均相关性 (答准率): {avg_rel:.2f} / 5.0")
+    print("="*40)
+    
+    with open("eval_report.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=4)
+
+if __name__ == "__main__":
+    run_evaluation()
+```
+
+### 💡 你现在的首要任务：
+
+1. **去建数据集**：和工作室的同学一起，每人写 10 个你们觉得有价值的 CAE / 施工装备配置相关的 QA 对，把 `eval_dataset.json` 丰富起来。
+
+2. **暴露 Context**：去你的 `rag.py` 里，稍微调整一下链条最后的输出。把大模型的回答和捞出来的 `context` 打包成一个字典返回（目前你的代码只 `yield` 了最终字符串）。
+
+3. 🚀 破局方案：1 小时的“降维打击”策略
+
+   其实，你完全不需要因为觉得麻烦而退缩。你之所以想推给队友，是因为你潜意识里觉得“做评估需要几千条数据，跑好几天”。
+
+   **在个人/实验室项目中，你只需要花 1 个小时，做一次“微型评估（Micro-Evaluation）”，就能在面试中大杀四方：**
+
+   1. **极其极简的数据集**：不要 50 条，你只需要自己手写 **5 条**最经典的 QA 对（比如 2 条问参数的，2 条问概念的，1 条故意问错的）。
+   2. **跑通我给你的脚本**：把这 5 条数据塞进我上一回合给你的 `evaluator.py` 里，一键运行。
+   3. **拿到真实的战报**：只需 2 分钟，你就能拿到一个真实的 JSON 报告，比如：“忠实度 4.8，相关性 3.2”。
+
+   **有了这 5 条数据的运行结果，你的面试话术将发生质的飞跃：**
+
+   > **面试完美话术模板：** “在项目后期，我为了量化系统能力，引入了 RAGAS 评估体系的核心思想。我提取了实验室真实的高频问题作为 Ground Truth，写了一个 Python 脚本调用 Qwen-Max 作为裁判模型打分。
+   >
+   > **我发现了一个非常有意思的现象**（*开始讲真实的 Bad Case*）：系统的召回率很高，但相关性得分只有 3.2 分。我通过排查底层的 Chroma 数据库发现，是因为 Marker 解析 PDF 时把一段表格拆散了，导致大模型回答时抓不到表头。
+   >
+   > **为了解决这个问题**，我立刻回去修改了系统的切片策略，加入了 `chunk_overlap`，并将重写查询（Query Rewrite）引入了 LangChain 的 LCEL 管道。再次运行评估脚本后，相关性得分直接提升到了 4.5 分。形成了一个完美的优化闭环。”
+
+## 面试模拟
 
 ### 1. 核心知识储备：BGE-Reranker 与 RRF
 
@@ -275,6 +580,11 @@ CAE_RAG_project/
 
 解决“语义鸿沟”，用户倾向于使用简短、模糊的口语，而知识库通常是详实、专业的书面语。改写能对齐两者的表达空间；消除“意图模糊”，原始Query往往缺失背景，改写通过引入上下文，江模糊的提问转化为具体、可检索的声明式描述；关联“历史信息”，在多轮对话中，用户常使用代词，改写能完成指代消解，确保每一轮检索都精准无误。
 
+**2. 挡不住大厂的“穿透式提问”** 就算你强行把评估写在简历上，打算靠“背诵理论”蒙混过关，面试官只需两个真实的工程问题就能把你问穿：
+
+- “你们用大模型做裁判时，**遇到过最大的 Bad Case（误判）是什么**？你们是怎么修改 Prompt 让裁判变聪明的？”
+- “你们跑完评估后，发现 Context Precision（精度）和 Context Recall（召回率）分别是多少？**针对这个较低的数据，你具体改了代码里的哪行配置？** 效果提升了多少？” 如果你没有真正跑过那段脚本，看到过真实的 JSON 报错和离谱的分数，你绝对编不出真实的 Bad Case，一旦卡壳，整个项目的真实性都会被画上问号。
+
 #### 🥚 第一层：直击痛点（产品与体验层）
 
 **🗣️ 面试官可能问：** > “大模型的 API 直接返回一个完整的字符串不香吗？为什么要费劲去做流式输出？”
@@ -306,44 +616,6 @@ CAE_RAG_project/
 
 - **痛点 1：历史状态断层。** “流式输出是一截一截的碎片，如果不做处理，大模型回答完之后，前端的对话历史里根本没有这句完整的话。所以必须在前端用一个变量（比如我用的 `full_response`）把水管里流出来的所有水滴拼接起来，等流式结束后，再统一 `append` 到 session 状态里落盘，保证上下文的连贯。”
 - **痛点 2：Agent 思考过程的过滤。** “在做复杂任务（比如基于 LangGraph 做自动化调度节点）时，Agent 的运行是分阶段的。它可能会先输出调用了某个 API（比如查询装备库），拿到结果后再思考。这时的流式数据不仅有最终的‘聊天文本’，还有‘工具调用的 JSON 结构’。这就需要在流式输出时加上**事件过滤器**（比如解析 LangChain 的 `astream_events`），屏蔽掉后端的机器代码，只把面向用户的自然语言 `yield` 给前端。”
-
-### 评估板块
-
-------
-
-你需要从以下**三个核心维度**对你的系统建立监控和测评：
-
-#### 1. 响应延迟测评 (Latency / System Profiling)
-
-- **TTFT (Time To First Token)：** 用户发问后，流式输出打出第一个字的耗时。
-- **Retrieval Time：** 检索器从 Chroma + BM25 中召回 Document 的耗时（混合检索通常会增加几百毫秒延迟）。
-- **Embedding Time：** 上传文档时的处理速度（即我们刚才打点的部分）。
-
-#### 2. 检索质量测评 (Retrieval Evaluation)
-
-- **Context Precision (上下文精度)：** 召回的 Top-3 片段中，到底有多少是真正包含答案的？还是召回了一堆干扰信息？
-- **Context Recall (上下文召回率)：** 为了回答某个问题所需的所有前提条件，你的系统都成功找齐了吗？（这对于隧道施工这种多工序、强关联的知识点极其重要）。
-
-#### 3. 生成质量测评 (Generation Evaluation)
-
-- **Faithfulness (忠实度/幻觉率)：** 大模型的回答，是否 100% 来源于你召回的参考资料？有没有自己胡编乱造隧道施工参数？
-- **Answer Relevance (回答相关性)：** 回答有没有偏题？
-
-**🛠️ 测评工具推荐：** 你可以了解一下 **RAGAS (RAG Assessment)** 或者 **TruLens**。这两个开源框架可以自动化地帮你计算上述所有指标，给你的系统打出一个雷达图分数。这会让你的项目（或论文）看起来具有极高的学术严谨性和工程落地价值！
-
-#### 📝 后续评估（Evaluation）该怎么做？
-
-既然你要做系统的测评评估，针对入库（Indexing）阶段，你可以记录并评估以下三个核心指标：
-
-1. **吞吐率 (Throughput)**
-   - **计算公式**：`处理总字数 / 总耗时 (total_time)`
-   - **意义**：评估你的系统每秒能处理多少字的知识入库（比如 5000字/秒）。这决定了未来如果给全量规程数据（比如上百本 PDF）建库需要多少小时。
-2. **切片合理性评估 (Chunk Quality)**
-   - **评测方法**：随机抽取入库的 50 个 `knowledge_chunks`，人工（或用 LLM 打分）评估：段落语义是否完整？有没有把一句话从中间截断？公式有没有被破坏？
-   - **优化点**：如果切出来的东西牛头不对马嘴，你就需要调整 `config.chunk_size` 和 `config.chunk_overlap`。
-3. **API 成本与并发瓶颈**
-   - **评测方法**：记录每次入库请求的 Token 消耗量。
-   - **瓶颈测试**：DashScope API 有 QPS（每秒请求数）和 TPM（每分钟 Token 数）限制。当上传超级大文件时，如果不做批处理（Batching）或者加延时（sleep），可能会触发阿里云的限流报错（HTTP 429 Too Many Requests）。
 
 ### 1. 技术选型的 Trade-off (权衡) 能力
 
