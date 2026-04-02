@@ -6,38 +6,32 @@
 
 该系统通过接收用户的自然语言需求（例如“建一个子弹冲击模型，稍微改薄一点”），基于 **LangGraph状态图** 的多智能体 **数据流编程** 架构与 **自动化执行脚本**，自动完成 **意图识别、参数提取、物理规则校验与修正、以及仿真脚本生成**。
 
-**核心亮点架构：** 系统采用 Agentic Workflow（智能体工作流）模式，有别于不可控的完全自主 Agent。通过 `StateGraph` 维护全局状态，并引入了 **Reflexion（反思纠错）** 机制。当大模型提取的物理参数违背工程常识时（如子弹半径为负数），Critic 节点会打回请求，强制大模型根据报错日志重新提取，形成闭环。
+- **核心亮点架构：** 系统采用 Agentic Workflow（智能体工作流）模式，有别于不可控的完全自主 Agent。通过 `StateGraph` 维护全局状态，并引入了 **Reflexion（反思纠错）** 机制。当大模型提取的物理参数违背工程常识时（如子弹半径为负数），Critic 节点会打回请求，强制大模型根据报错日志重新提取，形成闭环。
 
-**mcp微服务设计**：
+- **mcp微服务设计**：
 
 1. `server.py`：【档案室老总工】（核心业务逻辑）
 
-- **他在干嘛：** 他手里拿着那本 `material_db.json`（档案本）。他只懂一件事：你给他一个名字（比如“V级围岩”），他就翻开本子，把密度和模量念给你听。
-- **本质：** 这是一个极其纯粹的**本地 Python 函数**。如果没有外部干预，他只能和你在同一个办公室（同一个 Python 进程）里交流。
+   - **他在干嘛：** 他手里拿着那本 `material_db.json`（档案本）。他只懂一件事：你给他一个名字（比如“V级围岩”），他就翻开本子，把密度和模量念给你听。
+
+   - **本质：** 这是一个极其纯粹的**本地 Python 函数**。如果没有外部干预，他只能和你在同一个办公室（同一个 Python 进程）里交流。
+
 
 2. `server_entry.py`：【对外开放的 400 客服热线】（MCP 服务端启动入口）
 
-- **他在干嘛：** 假设你的档案室老总工（`server.py`）非常牛逼，现在全行业都想找他查数据。你不能让全行业的人都跑进你的办公室吧？于是，你设立了一个 400 客服中心（`FastMCP`）。你让老总工戴上客服耳机（`app.tool()(lookup_material_db.func)`），通过标准的电话线路（`stdio` 或 HTTP）对外提供服务。
-- **本质：** 这是一个**服务暴露（Service Exposer）**。它把一个本地的 Python 函数，包装成了一个全网通用的、跨语言的微服务（Microservice）。哪怕对面是一个用 Java 写的业务系统，或者是远在美国的一台服务器，只要拨通这个 MCP 热线，就能找老总工查数据。
+   - **他在干嘛：** 假设你的档案室老总工（`server.py`）非常牛逼，现在全行业都想找他查数据。你不能让全行业的人都跑进你的办公室吧？于是，你设立了一个 400 客服中心（`FastMCP`）。你让老总工戴上客服耳机（`app.tool()(lookup_material_db.func)`），通过标准的电话线路（`stdio` 或 HTTP）对外提供服务。
+
+   - **本质：** 这是一个**服务暴露（Service Exposer）**。它把一个本地的 Python 函数，包装成了一个全网通用的、跨语言的微服务（Microservice）。哪怕对面是一个用 Java 写的业务系统，或者是远在美国的一台服务器，只要拨通这个 MCP 热线，就能找老总工查数据。
+
 
 3. `provider.py`：【公司的行政调度总管】（动态路由 / 依赖注入）
 
-- **他在干嘛：** 现在你的大模型（Extractor 节点）遇到困难了，需要查材料。大模型跟行政总管（`provider.py`）说：“给我一个能查资料的工具！” 此时，行政总管会看一眼老板定的规矩（环境变量 `TOOL_BACKEND`）：
-  - **情况 A（`local`，也就是目前的现状）：** 老板说咱们现在是单机测试，别搞那么复杂。总管就直接把大模型领到档案室老总工（`server.py`）面前，面对面查。
-  - **情况 B（`mcp`，未来的分布式架构）：** 老板说档案库现在搬到阿里云的独立服务器上了。总管就会塞给大模型一部电话（MCP Client），让大模型通过拨打 400 热线（对接 `server_entry.py`）去查。
-- **本质：** 这叫做**工厂模式（Factory Pattern）与适配器（Adapter）**。它的伟大之处在于：**大模型（业务代码）永远不需要知道数据是在本地硬盘里，还是在十万八千里外的服务器上。** 大模型只管用工具，脏活累活全由 `provider.py` 在底层默默切换了。
+   - **他在干嘛：** 现在你的大模型（Extractor 节点）遇到困难了，需要查材料。大模型跟行政总管（`provider.py`）说：“给我一个能查资料的工具！” 此时，行政总管会看一眼老板定的规矩（环境变量 `TOOL_BACKEND`）：
+     - **情况 A（`local`，也就是目前的现状）：** 老板说咱们现在是单机测试，别搞那么复杂。总管就直接把大模型领到档案室老总工（`server.py`）面前，面对面查。
+     - **情况 B（`mcp`，未来的分布式架构）：** 老板说档案库现在搬到阿里云的独立服务器上了。总管就会塞给大模型一部电话（MCP Client），让大模型通过拨打 400 热线（对接 `server_entry.py`）去查。
 
-**💡 架构师灵魂拷问：为什么要搞这么复杂？**
+   - **本质：** 这叫做**工厂模式（Factory Pattern）与适配器（Adapter）**。它的伟大之处在于：**大模型（业务代码）永远不需要知道数据是在本地硬盘里，还是在十万八千里外的服务器上。** 大模型只管用工具，脏活累活全由 `provider.py` 在底层默默切换了。
 
-你可能会问：“既然我现在只是在自己电脑上跑（`local` 模式），我干嘛要写 `server_entry.py` 和 `provider.py`？”
-
-因为这是在为未来的**“降维打击”**做铺垫： 假设下个月，你的系统越做越大，你接入了 10 个不同的工具（查天气的、查国家标准的、甚至让机械臂动的）。如果全写在一个工程里，你的代码会臃肿到无法运行（依赖冲突、内存爆炸）。 有了现在的架构，你未来只需要：
-
-1. 把查材料的功能单独拿出来，用 `python server_entry.py` 在 A 服务器启动。
-2. 把查国标的功能在 B 服务器启动。
-3. 把 `TOOL_BACKEND` 改成 `mcp`。
-
-**你的 `nodes.py` 和 `main.py` 一行代码都不用改**，你的单机脚本就瞬间进化成了支持十万人高并发的高可用分布式云端架构！这就是 MCP（模型上下文协议）想要一统江湖的核心野心。
 
 ## 📂 项目模块深度拆解
 
@@ -140,9 +134,60 @@
   - **表现：** 比如几何特征拉伸失败、装配体干涉（布尔运算失败）、网格极度扭曲导致求解器不收敛退出。
   - **系统动作：硬拦截 (Hard Stop) + 专家介入。** 系统明知大模型没有空间三维想象力，**拒绝**让大模型瞎猜重试以浪费 Token。直接挂起工作流，输出明确的排查方向（“检测到 ACIS 几何内核崩溃，请人工核对 Jinja2 模板中的几何约束关系”）。
 
+### 🚨 痛点一：没有评估体系 (Eval)
+
+**面试官潜台词：** 你怎么证明你的系统是有效的？凭你截图里的那两张成功运行的图吗？
+
+**💡 你的高阶话术（甩锅给传统 NLP，提出业务专属 Eval）：**
+
+> “在 MVP 阶段没有做大规模评估，是因为**传统的 NLP 评估指标（如 BLEU、ROUGE）对于 CAE 代码生成毫无意义**。哪怕大模型生成的代码和标准答案只差一个缩进，Abaqus 也会直接崩溃。 因此，我在系统设计之初就构思了一套**‘基于执行反馈的三维 Eval 体系’**，目前正准备接入：
+>
+> 1. **参数提取准确率（Pydantic 层）：** 评估模型能否 100% 按照 Schema 输出合法格式。
+> 2. **物理常识通过率（Critic 层）：** 统计大模型生成的参数被 Critic 拦截的频率，以此衡量基础模型的物理幻觉程度。
+> 3. **最终编译成功率（Executor 层）：** 这是唯一的核心指标。跑通 100 条刁钻测试用例，统计最终能成功生成 `.cae` 文件的比例。”
+
+**🛠️ 极速补救指南（只需半天）：** 写一个最简单的 `eval.py` 脚本。里面放 20 句话（比如“帮我建个隧道”、“子弹半径 50 打 10 厚的钢板”）。写个 `for` 循环把它们喂进你的 `main.py`，最后统计沙盒里成功生成了几个 `.cae` 文件。这就是最真实的评估！
+
+------
+
+### 🚨 痛点二：没有接入 RAG
+
+**面试官潜台词：** 你连 RAG 都没做，你这算什么前沿 AI 项目？
+
+**💡 你的高阶话术（用 MCP 降维打击）：**
+
+> “不是我没有做 RAG，而是我**在底层设计上主动把 RAG 降级成了 MCP 架构下的一个 Tool**。 对于 CAE 仿真来说，物理属性（如钢材密度 8.1e-09）要求**绝对的确定性**，如果用 RAG 的向量检索去搜，极易发生数字截断或错位，引发严重的工程事故。所以我优先开发了基于 MCP 的结构化数据库查询（Function Calling）。 至于 RAG，我计划在下一个版本中，将我之前研发的高精度 RAG 系统（跨模态/双路召回）**封装成另一个 MCP Tool（比如叫 `query_engineering_manual`）**。当大模型需要查阅非结构化的施工规范（如“V级围岩的常见支护策略”）时，调用 RAG 工具；当需要具体数值时，调用结构化 DB 工具。”
+
+*(注：这套话术直接把你简历上另外那个 RAG 项目完美联动了！面试官绝对会被你的架构视野折服。)*
+
+------
+
+### 🚨 痛点三：没有长短对话记忆 (Memory)
+
+**面试官潜台词：** 你的 Agent 是一次性的吗？用户说错了想修改怎么办？
+
+**💡 你的高阶话术（结合 LangGraph 特性）：**
+
+> “针对 CAE 建模的业务流，我将记忆严格拆分为两层： **1. 短期会话记忆（Session Memory）：** 既然我用了 LangGraph，它原生的 `Checkpointer` 机制就已经天然支持了 Thread 级别的状态保留。我的 `state` 字典本身就是流转的短期记忆，配合我的 HITL（人类在环）机制，用户完全可以在中途打断并补充上下文。 **2. 长期工程偏好记忆（Long-term Memory）：** 这是我 Roadmap 里的高优项。我计划引入轻量级向量库（如 ChromaDB）作为长期记忆模块。每次生成成功后，将用户的常用配置（例如‘该工程师习惯使用 C30 喷射混凝土’）沉淀下来。下次他再提问时，Planner 节点会优先提取这些偏好，进一步降低 Token 消耗并提升生成速度。”
+
+**🛠️ 极速补救指南（只需 10 分钟）：** LangGraph 的短期记忆真的是自带的！你只需要在 `main.py` 里引入 `MemorySaver`：
+
+Python
+
+```
+from langgraph.checkpoint.memory import MemorySaver
+memory = MemorySaver()
+# 编译图的时候传进去
+app = workflow.compile(checkpointer=memory)
+# 运行的时候带上 thread_id
+app.stream(inputs, config={"configurable": {"thread_id": "user_123"}})
+```
+
+加上这三行代码，你的系统瞬间就拥有了支持多轮对话的短期记忆能力！
+
 ## 使用模式
 
-### 💻 模式一：个人工作站模式（你现在的状态，MVP 阶段）
+#### 💻 模式一：个人工作站模式（你现在的状态，MVP 阶段）
 
 **适用场景：** 你的毕业设计、个人科研、或者发顶会论文。 **物理状态：** 所有东西都在你这一台装了 Abaqus 的高配电脑上。
 
@@ -151,7 +196,7 @@
 
 ------
 
-### 🏢 模式二：设计院 / 企业内部微服务模式（MCP 的真正威力）
+#### 🏢 模式二：设计院 / 企业内部微服务模式（MCP 的真正威力）
 
 **适用场景：** 你们课题组有 20 个人，或者某个工程设计院有 100 个仿真工程师。 **物理状态：** 数据集中管理，算力和 Agent 分散在员工电脑上。
 
@@ -164,7 +209,7 @@
 
 ------
 
-### ☁️ 模式三：终极云端 SaaS 平台模式（真正的商业化产品）
+#### ☁️ 模式三：终极云端 SaaS 平台模式（真正的商业化产品）
 
 **适用场景：** 你打算拿着这个项目去创业，做一个类似“云端 CAE 智能助手”的网页端商业软件。 **物理状态：** 用户啥也不用装，连 Abaqus 都不用装，只需要一个浏览器。
 
@@ -177,13 +222,107 @@
   6. 超算节点算完后，把 3D 可视化结果或 `.cae` 文件传回给 Web 服务器，最后展示在客户的浏览器网页上。
 - **特点：** 极致的商业化。核心技术和算力全部握在你手里，客户按次付费。
 
+#### mcp底层：
+
+这个问题问到了 **MCP (Model Context Protocol) 协议真正的灵魂所在**！
+
+你现在的疑惑非常精准：既然大模型在我的电脑上，材料库在公司的服务器上，那大模型是怎么“跨过网线”去调用那个函数的呢？
+
+答案就藏在 MCP 协议的**传输层（Transport Layer）**里。
+
+为了让你彻底搞懂，我们把底层的“黑魔法”扒开来看。MCP 协议支持两种最核心的通信方式：**Stdio（标准输入输出）** 和 **SSE（Server-Sent Events，基于 HTTP 的网络请求）**。
+
+咱们来看看你的 `server_entry.py` 和 `provider.py` 会如何配合完成这次“异地恋”：
+
 ------
 
-### 💡 总结一下你的混淆点
+#### 🏢 第一步：公司服务器端的改造（从“单机版”变成“Web服务”）
 
-你刚才觉得“所有人连接服务器来跑也不对”，是因为你潜意识里知道 **Abaqus 这个软件太重了，且有版权限制**。
+目前你的 `server_entry.py` 最后一行写的是： `app.run(transport="stdio")` 这代表它只能和同一台电脑里的其他程序“咬耳朵”通信。
 
-如果按“模式三”把所有东西放服务器，你需要买非常昂贵的服务器算力来跑几十个并发的 Abaqus，成本极高。 所以，在你们现阶段（或者大多数中小企业内部），**“模式二”才是最完美的形态：让员工用自己电脑的算力（Abaqus）跑仿真，但必须向公司的中央服务器（MCP Tool）请求权威数据和专家提示词。**
+如果你要把这台电脑变成**公司服务器**，你只需要改这一行代码，把它变成一个基于 HTTP 的网络服务：
+
+Python
+
+```
+# 公司服务器上的 server_entry.py
+from mcp.server.fastmcp import FastMCP
+from mcp_tools.server import lookup_material_db
+
+app = FastMCP("cae-material-db")
+app.tool()(lookup_material_db.func)
+
+# 🚀 魔法在这里！把 transport 变成 sse，并绑定一个端口
+if __name__ == "__main__":
+    # 这样一跑，这台服务器就变成了一个监听 8000 端口的 Web 微服务！
+    app.run(transport="sse", host="0.0.0.0", port=8000) 
+```
+
+运行之后，公司服务器就会生成一个类似 `http://192.168.1.100:8000/sse` 的网址。这个网址，就是全公司查材料的**唯一官方热线**。
+
+------
+
+#### 💻 第二步：员工电脑上的改造（让 Provider 变成“拨号员”）
+
+现在回到你自己的电脑。你的大模型 Agent 在 `nodes.py` 里大喊：“我要查 X-90特种钢！” 这时候，你的 `provider.py`（行政总管）就要开始拨打公司的热线电话了。
+
+在 `mcp` 模式下，你的 `provider.py` 底层逻辑会变成这样：
+
+Python
+
+```
+# 员工电脑上的 provider.py
+import os
+# 引入 MCP 的网络客户端传输协议
+from mcp.client.sse import SSEClientTransport 
+from mcp.client.session import ClientSession
+
+def get_material_lookup_tool():
+    backend = os.getenv("TOOL_BACKEND", "local").strip().lower()
+    
+    if backend == "mcp":
+        # 🚀 1. 拨打公司服务器的热线电话
+        server_url = "http://192.168.1.100:8000/sse" 
+        
+        # 🚀 2. 建立网络连接 (这里是伪代码描述机制)
+        transport = SSEClientTransport(url=server_url)
+        session = ClientSession(transport)
+        
+        # 🚀 3. 获取远程服务器上的工具，并把它包装成 LangChain 能懂的本地 Tool
+        # 大模型拿到这个 tool 之后，以为自己在调本地函数，其实底层的网络请求已经被 MCP 接管了！
+        remote_tool = wrap_mcp_to_langchain_tool(session, "lookup_material_db")
+        return remote_tool
+        
+    else:
+        # 如果是 local 模式，直接把同一台电脑里的函数发出去
+        from mcp_tools.server import lookup_material_db
+        return lookup_material_db
+```
+
+------
+
+#### 🔄 完整的数据狂飙之旅（网络层视角）
+
+当你的同事在他的电脑上敲下测试用例，背后发生的网络通信是这样的：
+
+1. **[本地大模型思考]** 大模型发现需要查“V级围岩”，决定调用 `lookup_material_db` 工具。
+2. **[本地发起请求]** 员工电脑上的 MCP Client（在 `provider.py` 里初始化的那个），把大模型的请求打包成一个标准的 JSON 数据包：`{"name": "lookup_material_db", "args": {"material_name": "V级围岩"}}`。
+3. **[跨越网线]** 这个 JSON 数据包通过公司的内网路由器（HTTP POST 请求），瞬间飞到了公司服务器的 `192.168.1.100:8000` 端口。
+4. **[服务器执行]** 公司服务器的 `server_entry.py` 收到请求，打开它自己硬盘上的 `material_db.json`，查到数据。
+5. **[数据传回]** 公司服务器把查到的密度和模量，再次打包成 JSON，通过 SSE (Server-Sent Events) 通道，顺着网线飞回员工的电脑。
+6. **[本地渲染]** 员工电脑上的 `Extractor` 节点收到数据，继续推理，生成 Abaqus 脚本。
+
+#### 💡 为什么 MCP 这么伟大？
+
+通过这个机制你可以看到，**大模型和业务代码完全不需要懂网络编程！** 你不需要写复杂的 `requests.post()`，也不需要写 API 接口解析。MCP 协议就像一个**“万能插座”**：
+
+- 服务器端插上 `FastMCP`，暴露出工具。
+- 客户端插上 `MCP Client`，获取到工具。
+- 两人一握手，大模型就像调用自己电脑里的函数一样，丝滑地调用了远在天边的微服务。
+
+这就是为什么你在简历里写上**“引入 Provider 工厂模式，支持‘本地内存直调’与‘FastMCP 跨进程 RPC’无缝热切换”**，会让面试官觉得你极其专业的原因。因为你设计的架构，已经完美预判了企业级系统从“单机研发”走向“分布式部署”的必经之路！
+
+------
 
 ## 🎙️ 模拟面试
 
@@ -277,6 +416,14 @@
 > 但我在设计这个工具时，是**严格按照 MCP 的核心理念（模型与上下文数据源彻底解耦）来做架构规划的**。目前的 `lookup_material_db` 已经沉淀为了标准的 JSON Schema 输入输出。
 >
 > 之所以目前没有直接部署成重量级的标准 MCP Server，是因为当前系统处于单机验证阶段，引入跨进程的 RPC 通信会徒增延迟和运维成本。但因为我的工具层（Tool）和控制流（Node）是完全解耦的，未来如果要接入企业级的云端材料数据库，我只需要将这个本地函数平滑重构成一个 MCP Server 即可，上层的图状态机核心代码一行都不用改。”
+
+#### 🛡️ 面试官提问7：那这个mcp就只实现了一个参数查询，是不是有点大材小用了，我用一个rag也能做啊
+
+> “您问到了这套架构的核心设计初衷！ 如果只是为了查一个几十行数据的 JSON，用 MCP 确实是大材小用。但我的架构设计是为了**未来的企业级微服务化做底层铺垫**。
+>
+> 物理参数查询属于‘结构化高优数据’，RAG 的向量检索容易导致小数点或量纲丢失，在 CAE 领域这是致命的，因此必须采用确定性的 Tool Calling 机制。
+>
+> 更重要的是，我引入 MCP 协议，是将它作为一个**标准化插件底座**。材料库查询只是第一个概念验证（PoC）。有了这个底座，未来系统不仅能横向扩展去调用关系型数据库（如 MySQL），更能直接打通企业内部的 ERP、实时传感器 API，甚至是远程的高性能计算集群（HPC）调度接口。这让系统不仅是一个‘会说话的智库’，更是一个‘能操作软件和系统的数字员工’。”
 
 ## 提示词模板
 
@@ -903,6 +1050,262 @@ def lookup_material_db(material_name: str) -> str:
 query_local_material_db = lookup_material_db
 ```
 
+### skills
+
+--bullet_skill
+
+#### 1.prompt_template.md
+
+```markdown
+System:
+你是一个资深的 CAE 仿真参数提取专家。
+
+Task:
+用户会输入一段关于“子弹冲击钢板”的自然语言描述。你的任务是从中提取出关键的物理参数，并严格按照结构化 Schema 输出，绝对不要输出任何其他多余的文字或解释。
+
+Context (历史校验报错):
+{error_log}
+
+Rules:
+1. 几何参数 (geometry)
+- `plate_length` (钢板长宽)：默认值 200.0。
+- `plate_thickness` (钢板厚度)：默认值 20.0；如果用户表示“薄一点”，可取 10.0；“厚一点”，可取 30.0。
+- `bullet_radius` (子弹半径)：默认值 20.0。
+
+2. 材料参数 (material)
+- 如果用户未指定具体材料，默认使用标准 HPB300 钢：`density=7.85e-09`，`elastic_modulus=210000.0`。
+- 如果用户提到“高强钢”或类似描述，`elastic_modulus` 调整到 250000.0 左右。
+
+3. 物理与求解参数 (physics)
+- `step_time` (分析步长)：默认值 0.01 秒；如果用户要求看“更精细的瞬间”，可缩小为 0.005 或 0.001。
+
+4. 异常处理与追问机制 (Human-in-the-Loop)
+- 如果历史报错或当前输入存在明显物理矛盾，你不能擅自编造或改写核心几何尺寸。
+- 必须设置：
+  - `status = "need_clarification"`
+  - `message` 用专业 CAE 工程师口吻明确指出矛盾并反问用户如何调整。
+```
+
+#### 2.schema.py
+
+```python
+from pydantic import BaseModel, Field
+
+class GeometrySchema(BaseModel):
+    plate_length: float = Field(description="钢板的长和宽")
+    plate_thickness: float = Field(description="钢板的厚度")
+    bullet_radius: float = Field(description="子弹的半径")
+
+class MaterialSchema(BaseModel):
+    density: float = Field(description="材料密度")
+    elastic_modulus: float = Field(description="材料弹性模量")
+
+class PhysicsSchema(BaseModel):
+    step_time: float = Field(description="显式动力学分析步长")
+
+class SkillSchema(BaseModel):
+    status: str = Field(
+        default="success",
+        description="如果用户参数合理，输出 success；如果参数明显违反物理常识或存在缺失，输出 need_clarification",
+    )
+    message: str = Field(
+        default="",
+        description="如果 status 为 need_clarification，写下你要反问、提示或警告用户的话",
+    )
+    geometry: GeometrySchema
+    material: MaterialSchema
+    physics: PhysicsSchema
+
+
+```
+
+### bullet.py
+
+```python
+from abaqus import *
+from abaqusConstants import *
+from caeModules import *
+from driverUtils import executeOnCaeStartup
+import os
+os.chdir(r"G:\Abaqus\agent_project")
+mdb.saveAs(pathName='G:/Abaqus/agent_project/bullet')
+executeOnCaeStartup()
+s = mdb.models['Model-1'].ConstrainedSketch(name='__profile__', 
+    sheetSize=500.0)
+g, v, d, c = s.geometry, s.vertices, s.dimensions, s.constraints
+s.setPrimaryObject(option=STANDALONE)
+s.rectangle(point1=(0.0, 0.0), point2=({{ geometry.plate_length }}, {{ geometry.plate_length }}))
+p = mdb.models['Model-1'].Part(name='Part-1', dimensionality=THREE_D, 
+    type=DEFORMABLE_BODY)
+p = mdb.models['Model-1'].parts['Part-1']
+p.BaseSolidExtrude(sketch=s, depth={{ geometry.plate_thickness }})
+s.unsetPrimaryObject()
+p = mdb.models['Model-1'].parts['Part-1']
+del mdb.models['Model-1'].sketches['__profile__']
+s1 = mdb.models['Model-1'].ConstrainedSketch(name='__profile__', 
+    sheetSize=500.0)
+g, v, d, c = s1.geometry, s1.vertices, s1.dimensions, s1.constraints
+s1.setPrimaryObject(option=STANDALONE)
+s1.ConstructionLine(point1=(0.0, -250.0), point2=(0.0, 250.0))
+s1.FixedConstraint(entity=g[2])
+s1.CircleByCenterPerimeter(center=(0.0, 0.0), point1=({{ geometry.bullet_radius }}, 0.0))
+s1.Line(point1=(0.0, {{ geometry.bullet_radius }}), point2=(0.0, -{{ geometry.bullet_radius }}))
+s1.VerticalConstraint(entity=g[4], addUndoState=False)
+s1.ParallelConstraint(entity1=g[2], entity2=g[4], addUndoState=False)
+s1.CoincidentConstraint(entity1=v[2], entity2=g[2], addUndoState=False)
+s1.CoincidentConstraint(entity1=v[3], entity2=g[2], addUndoState=False)
+s1.autoTrimCurve(curve1=g[3], point1=(-{{ geometry.bullet_radius }} * 0.5, {{ geometry.bullet_radius }} * 0.5))
+p = mdb.models['Model-1'].Part(name='bullet', dimensionality=THREE_D, 
+    type=DISCRETE_RIGID_SURFACE)
+p = mdb.models['Model-1'].parts['bullet']
+p.BaseShellRevolve(sketch=s1, angle=360.0, flipRevolveDirection=OFF)
+s1.unsetPrimaryObject()
+p = mdb.models['Model-1'].parts['bullet']
+del mdb.models['Model-1'].sketches['__profile__']
+p = mdb.models['Model-1'].parts['bullet']
+v1, e, d1, n = p.vertices, p.edges, p.datums, p.nodes
+p.ReferencePoint(point=p.InterestingPoint(edge=e[0], rule=CENTER))
+p = mdb.models['Model-1'].parts['Part-1']
+mdb.models['Model-1'].parts.changeKey(fromName='Part-1', toName='plate')
+mdb.models['Model-1'].Material(name='HPB 300 snap')
+mdb.models['Model-1'].materials['HPB 300 snap'].DuctileDamageInitiation(table=(
+    (1.0, 0.0, 30.0), (0.5, 0.4, 30.0)))
+mdb.models['Model-1'].materials['HPB 300 snap'].ductileDamageInitiation.DamageEvolution(
+    type=DISPLACEMENT, table=((0.02, ), ))
+mdb.models['Model-1'].materials['HPB 300 snap'].Density(table=(({{ material.density }}, ), ))
+mdb.models['Model-1'].materials['HPB 300 snap'].Elastic(table=(({{ material.elastic_modulus }}, 0.3), ))
+mdb.models['Model-1'].materials['HPB 300 snap'].Plastic(scaleStress=None, 
+    table=((300.0, 0.0), (321.46, 0.01), (329.41, 0.02), (334.58, 0.1), (
+    355.64, 0.15), (366.37, 0.4), (378.69, 1.0), (437.1, 4.0)))
+mdb.models['Model-1'].HomogeneousSolidSection(name='Section-1', 
+    material='HPB 300 snap', thickness=None)
+p = mdb.models['Model-1'].parts['plate']
+c = p.cells
+cells = c.getSequenceFromMask(mask=('[#1 ]', ), )
+region = regionToolset.Region(cells=cells)
+p = mdb.models['Model-1'].parts['plate']
+p.SectionAssignment(region=region, sectionName='Section-1', offset=0.0, 
+    offsetType=MIDDLE_SURFACE, offsetField='', 
+    thicknessAssignment=FROM_SECTION)
+p = mdb.models['Model-1'].parts['bullet']
+p = mdb.models['Model-1'].parts['bullet']
+r = p.referencePoints
+refPoints=(r[2], )
+p.Set(referencePoints=refPoints, name='Set-p')
+a = mdb.models['Model-1'].rootAssembly
+a = mdb.models['Model-1'].rootAssembly
+a.DatumCsysByDefault(CARTESIAN)
+p = mdb.models['Model-1'].parts['bullet']
+a.Instance(name='bullet-1', part=p, dependent=ON)
+p = mdb.models['Model-1'].parts['plate']
+a.Instance(name='plate-1', part=p, dependent=ON)
+p1 = a.instances['plate-1']
+p1.translate(vector=(40.0, 0.0, 0.0))
+a = mdb.models['Model-1'].rootAssembly
+a.rotate(instanceList=('plate-1', ), axisPoint=(40.0, 0.0, 0.0), 
+    axisDirection=(10.0, 0.0, 0.0), angle=90.0)
+a1 = mdb.models['Model-1'].rootAssembly
+e11 = a1.instances['plate-1'].edges
+a1.DatumPointByMidPoint(point1=a1.instances['plate-1'].InterestingPoint(
+    edge=e11[2], rule=MIDDLE), point2=a1.instances['plate-1'].InterestingPoint(
+    edge=e11[9], rule=MIDDLE))
+a = mdb.models['Model-1'].rootAssembly
+a.translate(instanceList=('bullet-1', ), vector=(0.0, 100.0, 0.0))
+a = mdb.models['Model-1'].rootAssembly
+a.translate(instanceList=('plate-1', ), vector=(-140.0, 0.0, -100.0))
+#: The instance plate-1 was translated by -140., 0., -100. (相对于装配坐标系)
+mdb.models['Model-1'].ExplicitDynamicsStep(name='Step-1', previous='Initial', timePeriod={{ physics.step_time }}, improvedDtMethod=ON)
+mdb.models['Model-1'].fieldOutputRequests['F-Output-1'].setValues(variables=(
+    'S', 'SVAVG', 'PE', 'PEVAVG', 'PEEQ', 'PEEQVAVG', 'LE', 'U', 'V', 'A', 
+    'RF', 'CSTRESS', 'EVF', 'STATUS'))
+p = mdb.models['Model-1'].parts['bullet']
+p = mdb.models['Model-1'].parts['bullet']
+p.seedPart(size=4.5, deviationFactor=0.1, minSizeFactor=0.1)
+p = mdb.models['Model-1'].parts['bullet']
+p.generateMesh()
+p = mdb.models['Model-1'].parts['plate']
+p = mdb.models['Model-1'].parts['plate']
+p.seedPart(size=6.0, deviationFactor=0.1, minSizeFactor=0.1)
+p = mdb.models['Model-1'].parts['plate']
+p.generateMesh()
+a = mdb.models['Model-1'].rootAssembly
+a = mdb.models['Model-1'].rootAssembly
+a.regenerate()
+a1 = mdb.models['Model-1'].rootAssembly
+n1 = a1.instances['plate-1'].nodes
+nodes1 = n1.getSequenceFromMask(mask=('[#ffffffff:144 #ffff ]', ), )
+a1.Set(nodes=nodes1, name='Set-node')
+mdb.models['Model-1'].ContactProperty('IntProp-1')
+mdb.models['Model-1'].interactionProperties['IntProp-1'].TangentialBehavior(
+    formulation=PENALTY, directionality=ISOTROPIC, slipRateDependency=OFF, 
+    pressureDependency=OFF, temperatureDependency=OFF, dependencies=0, table=((
+    0.1, ), ), shearStressLimit=None, maximumElasticSlip=FRACTION, 
+    fraction=0.005, elasticSlipStiffness=None)
+mdb.models['Model-1'].interactionProperties['IntProp-1'].NormalBehavior(
+    pressureOverclosure=HARD, allowSeparation=ON, 
+    constraintEnforcementMethod=DEFAULT)
+a1 = mdb.models['Model-1'].rootAssembly
+s1 = a1.instances['bullet-1'].faces
+side1Faces1 = s1.getSequenceFromMask(mask=('[#1 ]', ), )
+region1=regionToolset.Region(side1Faces=side1Faces1)
+a1 = mdb.models['Model-1'].rootAssembly
+region2=a1.sets['Set-node']
+mdb.models['Model-1'].SurfaceToSurfaceContactExp(name ='Int-1', 
+    createStepName='Step-1', main = region1, secondary = region2, 
+    mechanicalConstraint=KINEMATIC, sliding=FINITE, 
+    interactionProperty='IntProp-1', initialClearance=OMIT, datumAxis=None, 
+    clearanceRegion=None)
+a1 = mdb.models['Model-1'].rootAssembly
+v1 = a1.instances['bullet-1'].vertices
+verts1 = v1.getSequenceFromMask(mask=('[#3 ]', ), )
+r1 = a1.instances['bullet-1'].referencePoints
+refPoints1=(r1[2], )
+region=regionToolset.Region(vertices=verts1, referencePoints=refPoints1)
+mdb.models['Model-1'].rootAssembly.engineeringFeatures.PointMassInertia(
+    name='Inertia-1', region=region, mass=0.1, i22=0.1, alpha=0.0, 
+    composite=0.0)
+a1 = mdb.models['Model-1'].rootAssembly
+f1 = a1.instances['plate-1'].faces
+faces1 = f1.getSequenceFromMask(mask=('[#5 ]', ), )
+region = regionToolset.Region(faces=faces1)
+mdb.models['Model-1'].EncastreBC(name='BC-1', createStepName='Initial', 
+    region=region, localCsys=None)
+a1 = mdb.models['Model-1'].rootAssembly
+r1 = a1.instances['bullet-1'].referencePoints
+refPoints1=(r1[2], )
+region = regionToolset.Region(referencePoints=refPoints1)
+mdb.models['Model-1'].Velocity(name='Predefined Field-1', region=region, 
+    field='', distributionType=MAGNITUDE, velocity1=0.0, velocity2=-100000.0, 
+    velocity3=0.0, omega=0.0)
+p = mdb.models['Model-1'].parts['plate']
+elemType1 = mesh.ElemType(elemCode=C3D8R, elemLibrary=EXPLICIT, 
+    kinematicSplit=AVERAGE_STRAIN, secondOrderAccuracy=OFF, 
+    hourglassControl=DEFAULT, distortionControl=DEFAULT)
+elemType2 = mesh.ElemType(elemCode=C3D6, elemLibrary=EXPLICIT)
+elemType3 = mesh.ElemType(elemCode=C3D4, elemLibrary=EXPLICIT)
+p = mdb.models['Model-1'].parts['plate']
+c = p.cells
+cells = c.getSequenceFromMask(mask=('[#1 ]', ), )
+pickedRegions =(cells, )
+p.setElementType(regions=pickedRegions, elemTypes=(elemType1, elemType2, 
+    elemType3))
+p = mdb.models['Model-1'].parts['bullet']
+a = mdb.models['Model-1'].rootAssembly
+a.regenerate()
+a = mdb.models['Model-1'].rootAssembly
+mdb.Job(name='Job-1', model='Model-1', description='', type=ANALYSIS, 
+    atTime=None, waitMinutes=0, waitHours=0, queue=None, memory=90, 
+    memoryUnits=PERCENTAGE, explicitPrecision=SINGLE, 
+    nodalOutputPrecision=SINGLE, echoPrint=OFF, modelPrint=OFF, 
+    contactPrint=OFF, historyPrint=OFF, userSubroutine='', scratch='', 
+    resultsFormat=ODB, numDomains=1, activateLoadBalancing=False, 
+    numThreadsPerMpiProcess=1, multiprocessingMode=DEFAULT, numCpus=1)
+mdb.jobs['Job-1'].submit(consistencyChecking=OFF)
+o3 = session.openOdb(name='G:/Abaqus/agent_project/Job-1.odb')
+session.animationOptions.setValues(frameRate=4)
+mdb.save()
+```
+
 ### main.py
 
 ```python
@@ -970,6 +1373,4 @@ def main():
 if __name__ == "__main__":
     main()
 ```
-
-5.
 

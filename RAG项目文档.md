@@ -682,3 +682,725 @@ if __name__ == "__main__":
 > “我导师的宏观项目是关于复杂地质下隧道施工的智能化决策与调度。在这个大课题中，我们需要处理海量的地质勘探规则、施工规范和数值仿真结果。
 >
 > 这个 RAG 引擎可以理解为我为了更好地支撑大课题而研发的‘底层知识底座’。比如，通过我做的这个高精度检索系统，我们可以更快速、准确地从规范中提取支护参数，作为后续辅助智能决策系统的输入。RAG 项目是我个人主导的技术探索，它极大地提升了我们在主干课题上的研究效率。”
+
+## 代码源文件 CAE_RAG_project
+
+### app.py
+
+```python
+import streamlit as st  # 构建简易的前端网页
+import uuid  # 引入 uuid 生成唯一标识
+from rag import RagService # 引入写好的 RagService 类串联整个流程
+from file_history_store import get_history # 引入从文件中读取历史记录的函数
+
+st.set_page_config(page_title="CAE 仿真专家助手", layout="wide")
+st.title("🛠️ CAE 智能客服与文档助手")
+st.divider()  # 添加分隔线
+
+# 👇 全局初始化 RagService 实例，仅首次加载时执行
+@st.cache_resource(show_spinner="正在全局初始化大模型引擎与知识库...")
+def init_rag_engine():
+    return RagService()
+rag_engine = init_rag_engine() # 👈 初始化 RagService 实例
+
+# 👇 为当前用户（浏览器标签页）生成唯一的 session_id
+if "session_id" not in st.session_state:
+    st.session_state["session_id"] = str(uuid.uuid4()) # 例如：'e3b0c442-989b-464c-8693-...'
+
+# 👇 初始化当前用户的聊天记录（如果不存在）
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [{"role": "assistant", "content": "你好，我是专注于 CAE 领域的智能客服。请问有什么工程仿真方面的问题可以帮助你？"}]
+
+with st.sidebar:
+    st.header("⚙️ 系统管理")
+    if st.button("🔄 同步最新知识库"):
+        with st.spinner("正在对齐稀疏索引与向量库数据..."):
+            rag_engine.retriever_service.sync_bm25_from_chroma()
+            st.success("同步完成！检索器已就绪。")
+
+    if st.button("🗑️ 清空当前对话"):
+        history = get_history(st.session_state["session_id"])
+        history.clear()
+        st.session_state["messages"] = [{"role": "assistant", "content": "对话已清空，让我们重新开始吧！\n\n 你好，我是专注于 CAE 领域的智能客服。请问有什么工程仿真方面的问题可以帮助你？"}]
+        st.rerun()
+
+# 渲染历史聊天记录
+for message in st.session_state["messages"]:
+    st.chat_message(message["role"]).write(message["content"])
+
+# 👇 处理用户输入
+prompt = st.chat_input("在这里输入你的问题，例如：在 Abaqus 中材料屈服强度参数应该如何设置？")
+if prompt:
+    st.chat_message("user").write(prompt)
+    st.session_state["messages"].append({"role": "user", "content": prompt})
+    
+    with st.chat_message("assistant"):
+        with st.spinner("🧠 正在进行多路召回与交叉重排..."):
+            
+            # 动态构造属于当前用户的 config，覆盖掉全局的 session_id
+            user_config = {
+                "configurable": {
+                    "session_id": st.session_state["session_id"]
+                }
+            }
+            # 把专属 config 传给大模型，这样 LangChain 就会自动去文件里找属于这个 UUID 的记录，并完成流式输出
+            res_stream = rag_engine.chain.stream(
+                {"input": prompt}, 
+                user_config 
+            )
+            full_response = st.write_stream(res_stream)                   
+    st.session_state["messages"].append({"role": "assistant", "content": full_response})
+```
+
+### file_uploader.py
+
+```python
+import streamlit as st
+import os
+import subprocess
+import shutil
+
+# --- 页面配置 ---
+st.set_page_config(page_title="CAE 知识库批量更新", page_icon="📚", layout="wide")
+st.title("📚 CAE 专属知识库批量更新控制台")
+st.markdown("支持**多文件同时上传** (PDF / Markdown)，系统将自动排队、深度解析并注入大模型知识库。")
+
+# --- 1. 定义工作目录 ---
+BASE_DIR = "G:/vscode/LangChain_Project/CAE_RAG_project" # 部署到服务器时，请确保修改为服务器的绝对路径！
+TEMP_UPLOAD_DIR = os.path.join(BASE_DIR, "temp_uploads") 
+MARKER_OUTPUT_DIR = os.path.join(BASE_DIR, "marker_output") 
+
+for d in [TEMP_UPLOAD_DIR, MARKER_OUTPUT_DIR]:
+    os.makedirs(d, exist_ok=True)
+
+# ==========================================
+# 🌟 全局缓存锁 (懒加载)
+# ==========================================
+@st.cache_resource(show_spinner=False)
+def get_kb_service():
+    from knowledge_base import KnowledgeBaseService 
+    return KnowledgeBaseService()
+
+# --- 2. 多文件上传组件 ---
+# 定义一个企业级全局常量
+MAX_FILES_LIMIT = 10 
+
+uploaded_files = st.file_uploader(
+    f"请将需要入库的 CAE 文献拖拽至此处 (支持 pdf/md，单次最多允许 {MAX_FILES_LIMIT} 个)", 
+    type=["pdf", "md"],
+    accept_multiple_files=True 
+)
+
+if uploaded_files:
+    total_files = len(uploaded_files)
+    
+    # ==========================================
+    # 🚨 核心风控：数量超限拦截器
+    # ==========================================
+    if total_files > MAX_FILES_LIMIT:
+        # 显示刺眼的红色错误提示，要求用户手动删减
+        st.error(f"❌ 队列超载！您当前选中了 **{total_files}** 个文件，系统单次最多支持处理 **{MAX_FILES_LIMIT}** 个。")
+        st.warning("👉 请点击上方文件列表右侧的 'X' 移除多余的文档，以解锁入库功能。")
+        
+        # 此时代码运行结束，底下的“开始处理”按钮根本不会被渲染出来，彻底阻断执行！
+        
+    else:
+        # 如果数量合规，正常走后面的流程
+        total_size_mb = sum([f.size for f in uploaded_files]) / (1024 * 1024)
+        st.info(f"📁 待处理队列合规：共 **{total_files}** 个文件，总大小 **{total_size_mb:.2f} MB**")
+
+        # --- 3. 批量处理主逻辑 (一键托管模式) ---
+        if st.button("🚀 开始批量解析与入库", type="primary"):        
+            with st.spinner("⏳ 正在唤醒大模型与向量数据库引擎..."):
+                kb_service = get_kb_service()
+
+            progress_bar = st.progress(0.0, text="准备启动批处理队列...")
+            st.markdown("### 📝 实时执行日志")
+            log_container = st.container(height=450) # 固定高度面板，保持页面整洁
+        
+            stats = {"success": 0, "skip": 0, "error": 0}
+            error_details = []
+
+            # ==========================================
+            # 🔄 开启文件遍历流水线
+            # ==========================================
+            for index, file in enumerate(uploaded_files):
+                file_name = file.name
+                file_type = file_name.split(".")[-1].lower()
+                base_name = os.path.splitext(file_name)[0]
+            
+                # 刷新总体进度条
+                current_progress = (index) / total_files
+                progress_bar.progress(current_progress, text=f"正在处理 ({index+1}/{total_files}): {file_name}")
+            
+                if index > 0:
+                    log_container.markdown(f"---")
+                log_container.write(f"▶️ **开始处理文档 [{index+1}/{total_files}]:** `{file_name}`")
+            
+                temp_file_path = os.path.join(TEMP_UPLOAD_DIR, file_name)
+                marker_folder_path = os.path.join(MARKER_OUTPUT_DIR, base_name)
+                marker_md_path = os.path.join(marker_folder_path, f"{base_name}.md")
+                parsed_text = None
+            
+                try:
+                    # 步骤 1：落地临时文件
+                    with open(temp_file_path, "wb") as f:
+                        f.write(file.getvalue())
+
+                    # 步骤 2：解析文件
+                    if file_type == "md":
+                        with open(temp_file_path, "r", encoding="utf-8") as f:
+                            parsed_text = f.read()
+                        log_container.write("✅ Markdown 读取成功")
+                    
+                    elif file_type == "pdf":
+                        log_container.write("🧠 正在调用 Marker 提取 PDF 内容与公式...")
+                        command = ["marker_single", temp_file_path, "--output_dir", MARKER_OUTPUT_DIR]
+                    
+                        # 融合你的绝佳设计：流式截断监听 Marker 进程，防止前端卡死！
+                        process = subprocess.Popen(
+                            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
+                            text=True, bufsize=1, encoding="utf-8", errors="replace"
+                        )
+                    
+                        for line in process.stdout:
+                            print(line.replace("\ufffd", "█"), end="", flush=True) # 后台终端依然保留全量日志
+                        
+                        process.wait()
+                    
+                        if process.returncode == 0 and os.path.exists(marker_md_path):
+                            with open(marker_md_path, "r", encoding="utf-8") as f:
+                                parsed_text = f.read()
+                            log_container.write("✅ PDF 深度解析成功")
+                        else:
+                            raise Exception("Marker 解析失败或未生成预期文件")
+
+                    # 步骤 3：提交入库
+                    if parsed_text:
+                        log_container.write("⚙️ 正在切片并调用大模型向量化...")
+                        # 利用你写好的对讲机机制，把进度实时打在滚动面板上
+                        result = kb_service.upload_by_str(parsed_text, file_name, progress_callback=log_container.write)
+                    
+                        if "[成功]" in result:
+                            stats["success"] += 1
+                            log_container.success(f"🎉 入库完成：{result}")
+                        elif "[跳过]" in result:
+                            stats["skip"] += 1
+                            log_container.warning(f"⏭️ 发现重复：{result}")
+                        else:
+                            raise Exception(result)
+
+                except Exception as e:
+                    # 异常隔离：记录失败，继续跑下一篇
+                    stats["error"] += 1
+                    error_msg = f"❌ '{file_name}' 处理失败: {str(e)}"
+                    log_container.error(error_msg)
+                    error_details.append(error_msg)
+                
+                finally:
+                    # 步骤 4：仅清理用户上传的原始临时文件，保留 Marker 产出的宝贵资产！
+                    log_container.write("🧹 正在清理当前上传的临时文件...")
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
+
+            # ==========================================
+            # 🏁 批处理结束，展示最终战报
+            # ==========================================
+            progress_bar.progress(1.0, text="✅ 队列处理完毕！")
+        
+            st.markdown("### 📊 批量入库战报")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("总计提交", f"{total_files} 份")
+            col2.metric("✅ 成功入库", f"{stats['success']} 份")
+            col3.metric("⏭️ 跳过重复", f"{stats['skip']} 份")
+            col4.metric("❌ 解析失败", f"{stats['error']} 份")
+        
+            if error_details:
+                with st.expander("查看失败详情"):
+                    for err in error_details:
+                        st.error(err)
+```
+
+### knowledge_base.py
+
+```python
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_core.documents import Document # 需要引入 Document 对象
+import hashlib
+import os
+import config_data as config
+from langchain_chroma import Chroma
+from langchain_community.embeddings import DashScopeEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from datetime import datetime
+from dotenv import load_dotenv
+
+# 加载 .env 环境变量
+load_dotenv()
+
+# 确保 API Key 存在
+api_key = os.getenv("DASHSCOPE_API_KEY")
+if not api_key:
+    raise ValueError("未找到 DASHSCOPE_API_KEY，请检查 .env 文件配置")
+
+
+def check_md5(md5_str: str) -> bool:
+    """检查传入的md5字符串是否已经被处理过了"""
+    # 确保父目录存在
+    md5_dir = os.path.dirname(config.md5_path)
+    if md5_dir:
+        os.makedirs(md5_dir, exist_ok=True)
+        
+    if not os.path.exists(config.md5_path):
+        with open(config.md5_path, "w", encoding="utf-8") as f:
+            pass # 创建空文件
+        return False
+        
+    # 使用 with 确保文件正确关闭
+    with open(config.md5_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip() == md5_str:
+                return True
+    return False
+
+def save_md5(md5_str: str):
+    """将传入的md5字符串记录到文件内保存"""
+    with open(config.md5_path, "a", encoding="utf-8") as f:
+        f.write(md5_str + "\n")
+    
+def get_string_md5(input_str: str, encoding='utf-8') -> str:
+    """将传入的字符串转换为md5字符串"""
+    md5_obj = hashlib.md5()
+    md5_obj.update(input_str.encode(encoding=encoding))
+    return md5_obj.hexdigest()
+
+class KnowledgeBaseService:
+    def __init__(self):
+        os.makedirs(config.persist_directory, exist_ok=True)
+        
+        # 初始化向量模型 (使用阿里云 DashScope)
+        self.embeddings = DashScopeEmbeddings(model="text-embedding-v4")
+        
+        # 初始化 Chroma 向量库
+        self.chroma = Chroma(
+            collection_name=config.collection_name,
+            embedding_function=self.embeddings,
+            persist_directory=config.persist_directory,
+        )
+        
+        # 🔪 武器库 1：Markdown 结构手术刀 (专治 PDF 和 MD 文件)
+        headers_to_split_on = [
+            ("#", "Header_H1"),
+            ("##", "Header_H2"),
+            ("###", "Header_H3"),
+        ]
+        self.md_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=headers_to_split_on,
+            strip_headers=False
+        )
+
+        # 🔪 武器库 2：字符长度切片刀 (保底防爆仓)
+        self.char_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.chunk_size,
+            chunk_overlap=config.chunk_overlap,
+            separators=config.separators,
+        )   
+
+    def upload_by_str(self, data: str, filename: str, progress_callback=None) -> str:
+        """将传入的字符串（从PDF/Markdown文件提取的文本）上传到知识库中"""
+        # 定义一个内部的小喇叭函数，方便调用
+        def report(msg):
+            if progress_callback:
+                progress_callback(f"\n{msg}\n")
+
+        # 1. 安全校验：防止空数据入库
+        if not data or not data.strip():
+            return f"[失败] '{filename}' 提取到的文本为空，无法上传向量库"
+
+        # 2. 生成 MD5 并查重
+        md5_hex = get_string_md5(data)
+        if check_md5(md5_hex):
+            return f"[跳过] 文件 '{filename}' 的内容已存在知识库中"
+        
+        # 判断文件后缀，决定切片策略
+        file_ext = filename.split(".")[-1].lower()
+        report("✂️ **1. 正在进行文档切片...**")
+
+        # 3. 拆分文本流获取 Documents 对象
+        # 因为系统限制了输入源为 MD 或转化后的 MD，直接统一使用 Markdown 结构化切片 + 字符切片兜底
+        print(f"[{filename}] 触发结构化切片管道...")
+        md_docs = self.md_splitter.split_text(data)
+        # 二次切分：防止某个标题下的段落超过 chunk_size
+        final_docs = self.char_splitter.split_documents(md_docs)
+
+        report(f"✅ 切片完成！共切分出 `{len(final_docs)}` 个片段")
+
+        # 4. 重组 Texts 和 Metadatas
+        knowledge_chunks = []
+        metadatas = []
+        
+        for i, doc in enumerate(final_docs):
+            knowledge_chunks.append(doc.page_content)
+            
+            # 继承 Markdown 切分器提取到的标题层级（如果有的话）
+            meta = doc.metadata.copy() 
+            # 补充我们系统的通用元数据
+            meta.update({
+                "source": filename,
+                "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "operator": "user",
+                "chunk_index": i
+            })
+            metadatas.append(meta)
+        report("🧠 **2. 正在生成多维向量特征并存入 Chroma...**")
+        # 6. 写入 Chroma 数据库
+        self.chroma.add_texts(
+            texts=knowledge_chunks,
+            metadatas=metadatas
+        )
+        report(f"✅ 向量化与入库完成！")
+        save_md5(md5_hex)
+        return f"[成功] '{filename}' 已切分为 {len(knowledge_chunks)} 个片段并入库"
+
+
+if __name__ == "__main__":
+    # 测试代码
+    try:
+        service = KnowledgeBaseService()
+        r = service.upload_by_str("这是一个集成测试字符串", "test_file.txt")
+        print(r)
+    except Exception as e:
+        print(f"初始化或上传失败: {e}")
+```
+
+### retriever_service.py
+
+```python
+import os
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+import jieba # 导入 jieba 分词库，用于中文文本的分词
+from rank_bm25 import BM25Okapi # 导入 BM25 算法，用于文本检索和排名
+from sentence_transformers import CrossEncoder # 导入 BGE-Reranker 模型，用于文本重排序
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+import config_data as config
+from langchain_community.embeddings import DashScopeEmbeddings
+from dotenv import load_dotenv
+load_dotenv()
+
+# 👇 定义混合检索器服务类
+class HybridRetrieverService:
+    def __init__(self, embedding):
+        print("\n" + "="*50)
+        print("🚀 初始化混合检索引擎 (Chroma Vector + BM25 Sparse + Reranker)")
+        
+        # 1. 挂载已有的 Chroma 向量数据库
+        self.embedding = embedding
+        self.vector_store = Chroma(
+            collection_name=config.collection_name,
+            embedding_function=self.embedding,
+            persist_directory=config.persist_directory,
+        )
+        # 2. 构建 BM25 索引
+        self.bm25 = None
+        self.chunks = []
+        self.sync_bm25_from_chroma()
+        # 3. 初始化重排序引擎
+        print("🧠 正在加载 BGE-Reranker 交叉编码重排序模型...")
+        self.reranker = CrossEncoder('BAAI/bge-reranker-base')
+        print("="*50 + "\n")
+
+    #  👇 同步 Chroma 向量库到 BM25 索引
+    def sync_bm25_from_chroma(self):
+        """
+        核心桥接逻辑：从 Chroma 中提取所有切片文本，实时构建 BM25 词频索引。
+        """
+        print("📚 正在从 Chroma 向量库同步数据构建 BM25 索引...")
+        try:
+            db_data = self.vector_store.get() 
+            
+            # 严格检查空数据，防止冷启动崩溃
+            if not db_data or not db_data.get('documents'):
+                print("⚠️ 当前向量库为空，暂不构建 BM25 索引。")
+                self.bm25 = None
+                self.chunks = []
+                return
+            self.chunks = [
+                Document(page_content=txt, metadata=meta) 
+                for txt, meta in zip(db_data['documents'], db_data['metadatas'])
+            ]
+
+            # 使用 jieba 对文档内容进行分词，用于 BM25 索引
+            tokenized_corpus = [list(jieba.cut_for_search(doc.page_content)) for doc in self.chunks]
+            # 确保语料库不为空才初始化 BM25
+            if tokenized_corpus:
+                self.bm25 = BM25Okapi(tokenized_corpus)
+                print(f"✅ BM25 索引构建完毕，共计 {len(self.chunks)} 个文档切片。")
+            else:
+                self.bm25 = None
+                
+        except Exception as e:
+            print(f"❌ 构建 BM25 索引时发生错误: {e}")
+            self.bm25 = None
+            self.chunks = []
+
+    #  👇 双路召回与 RRF 融合
+    def _hybrid_retrieve(self, query: str, top_k: int = 10, rrf_k: int = 60) -> list[Document]:
+        """第一阶段：双路召回与 RRF 融合"""
+        # --- 路线 A：Chroma 向量检索 ---
+        dense_results = self.vector_store.similarity_search(query, k=top_k)
+        
+        # --- 路线 B：BM25 关键词检索 ---
+        # 安全熔断：如果没有 BM25 索引，直接返回向量检索结果，不再执行 RRF
+        if not self.bm25 or not self.chunks:
+            print("⚠️ 未发现 BM25 索引，自动降级为纯向量检索。")
+            return dense_results 
+        tokenized_query = list(jieba.cut_for_search(query)) # 对查询进行分词
+        bm25_scores = self.bm25.get_scores(tokenized_query) # 计算 BM25 得分
+        bm25_top_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:top_k] # 取 BM25 得分最高的 top_k 个文档索引
+        sparse_results = [self.chunks[i] for i in bm25_top_indices] # 从 BM25 索引中提取 top_k 个文档
+
+        # --- 路线 C：RRF (倒数排名融合) ---
+        fused_scores = {}
+        # (1)Chroma 向量检索的 RRF 贡献
+        for rank, doc in enumerate(dense_results):
+            doc_key = doc.page_content 
+            if doc_key not in fused_scores:
+                fused_scores[doc_key] = {"doc": doc, "score": 0.0}
+            fused_scores[doc_key]["score"] += 1.0 / (rrf_k + rank + 1)
+        # (2)BM25 关键词检索的 RRF 贡献
+        for rank, doc in enumerate(sparse_results):
+            doc_key = doc.page_content
+            if doc_key not in fused_scores:
+                fused_scores[doc_key] = {"doc": doc, "score": 0.0}
+            fused_scores[doc_key]["score"] += 1.0 / (rrf_k + rank + 1)
+        # (3)按 RRF 得分降序并截取
+        reranked_results = sorted(fused_scores.values(), key=lambda x: x["score"], reverse=True)
+        return [item["doc"] for item in reranked_results[:top_k]]
+
+    #  👇 重排序
+    def search_and_rerank(self, query: str, initial_k: int = 10, final_k: int = 3) -> list[Document]:
+        """第二阶段：调用此方法执行完整的 RAG 检索链路"""
+        print(f"🔍 [阶段 1] 混合检索召回前 {initial_k} 个片段...")
+        initial_docs = self._hybrid_retrieve(query, top_k=initial_k)
+        if not initial_docs:
+            return []
+
+        print(f"⚖️ [阶段 2] BGE-Reranker 进行深度交叉语义打分...")
+        cross_inp = [[query, doc.page_content] for doc in initial_docs]
+        scores = self.reranker.predict(cross_inp)
+        # 绑定得分并排序
+        scored_docs = list(zip(initial_docs, scores))
+        scored_docs.sort(key=lambda x: x[1], reverse=True)
+        
+        print(f"🎯 [阶段 3] 优中选优，输出最终的 Top-{final_k}！")
+        # 只要文档，剔除分数，方便后续 LangChain 调用
+        final_docs = [doc for doc, score in scored_docs[:final_k]]
+        return final_docs
+
+
+if __name__ == "__main__":   
+    # 初始化嵌入模型和检索服务
+    embedding = DashScopeEmbeddings(model="text-embedding-v4")
+    retriever_service = HybridRetrieverService(embedding)
+    
+    # 执行混合检索 + 重排序
+    query_text = "什么是有限元分析？"
+    results = retriever_service.search_and_rerank(query_text, initial_k=10, final_k=3)
+    
+    print("\n📝 最终检索结果：")
+    for i, doc in enumerate(results):
+        print(f"[{i+1}] 来源: {doc.metadata.get('source', '未知')} | 内容: {doc.page_content[:50]}...")
+```
+
+### file_history_store.py
+
+```python
+import json
+import os
+from langchain_core.messages import BaseMessage, message_to_dict, messages_from_dict
+from langchain_core.chat_history import BaseChatMessageHistory
+from typing import Sequence
+
+def get_history(session_id):
+    return FileChatMessageHistory(session_id, "./chat_history")
+
+class FileChatMessageHistory(BaseChatMessageHistory):
+    def __init__(self, session_id, storage_path):
+        self.session_id = session_id
+        self.storage_path = storage_path
+        self.file_path = os.path.join(self.storage_path, self.session_id)
+        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+
+    @property
+    def messages(self) -> list[BaseMessage]:
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                messages_data = json.load(f)
+                return messages_from_dict(messages_data)
+        except FileNotFoundError:
+            return []
+        
+    def add_message(self, message: Sequence[BaseMessage]) -> None:
+        all_messages = self.messages
+        all_messages.append(message)
+        new_messages = [message_to_dict(message) for message in all_messages]
+        with open(self.file_path, "w", encoding="utf-8") as f:
+            json.dump(new_messages, f)
+    def clear(self) -> None:
+        with open(self.file_path, "w", encoding="utf-8") as f:
+            json.dump([], f)
+```
+
+### rag.py
+
+```python
+from retriever_service import HybridRetrieverService # 导入写好的混合检索器
+from langchain_community.embeddings import DashScopeEmbeddings # 导入阿里百炼 DashScope 嵌入模型
+from langchain_community.chat_models import ChatTongyi # 提供阿里通义千问大语言模型的接口
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder # 构建聊天格式的提示模板, 创建消息占位符用于动态插入对话历史
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_core.documents import Document
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables.history import RunnableWithMessageHistory 
+from file_history_store import get_history # 导入历史记录管理模块
+import config_data as config
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+def print_prompt(prompt):
+    print("="*20 + " 最终发给大模型的 Prompt " + "="*20)
+    print(prompt.to_string())
+    print("="*60)
+    return prompt
+
+def print_rewritten_query(query):
+    print(f"\n✨ [查询重写] 原始提问已被大模型优化为检索词: 【 {query} 】\n")
+    return query
+
+# 👇 定义智能 RAG 服务类
+class RagService(object):
+    def __init__(self):
+        print("🤖 正在初始化智能 RAG 核心服务...")
+        
+        # 1. 接入混合检索器 (Chroma + BM25 + BGE Reranker)
+        self.retriever_service = HybridRetrieverService(
+            embedding=DashScopeEmbeddings(model=config.embedding_model)
+        )
+
+        # 2. 初始化大模型 (这个模型会被 QA 和 重写 共用)
+        self.chat_model = ChatTongyi(model=config.chat_model, temperature=0.1)
+
+        # 3. 构造重写专门的 Prompt
+        contextualize_q_system_prompt = (
+            "你是一个专业的 CAE 工程仿真搜索词优化专家。"
+            "给定下面的聊天历史记录和最新的用户提问，"
+            "该问题可能依赖于历史对话的上下文才能看懂（比如使用了代词或省略了主语）。"
+            "请结合历史，把最新的问题重写为一个独立、完整、包含专业术语的搜索词，以便于在向量数据库中进行精准检索。"
+            "如果原问题不需要重写，请原样返回。"
+            "**绝对禁止回答问题，只输出重写后的确切句子！**"
+        )
+        self.rewrite_prompt = ChatPromptTemplate.from_messages([
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("history"), # 动态注入的历史记录
+            ("human", "最新提问：{input}")
+        ])
+
+        # 4. 构造专家级 QA Prompt
+        self.qa_prompt_template = ChatPromptTemplate.from_messages([
+            ("system", 
+             "你是一个严谨的 CAE 领域仿真工程专家。请仔细阅读以下【参考资料】，并根据资料内容专业、准确地回答用户的提问。\n\n"
+             "回答要求：\n"
+             "1. 主要基于参考资料中的信息进行回答。\n"
+             "2. 对于表格或离散数据，允许结合常见的工程或常识背景进行合理的逻辑推理。”\n"
+             "3. 如果实在无法推断，再回答：“抱歉，根据现有的知识库，暂无法解答该问题。\n\n"
+             "【参考资料】:\n{context}"), 
+            ("system", "以下是与用户的近期对话历史："),
+            MessagesPlaceholder("history"),
+            ("user", "【用户提问】: {input}")
+        ])
+        
+        # 5. 构建 LCEL 链
+        self.chain = self.__get_chain()
+
+    def __get_chain(self):
+        
+        # 构建重写链条 (Prompt -> LLM -> String)
+        rewrite_chain = self.rewrite_prompt | self.chat_model | StrOutputParser() | print_rewritten_query
+
+        # 包装检索方法，适配 LangChain 的管道
+        def perform_retrieval(rewritten_query: str) -> list[Document]:
+            # 调用重排序混合检索，召回 10 个，最终保留 3 个
+            return self.retriever_service.search_and_rerank(rewritten_query, initial_k=10, final_k=3)
+
+        # 格式化文档输出，用于 Prompt 模板
+        def format_document(docs: list[Document]):
+            if not docs:
+                return "没有找到相关的参考资料。"
+            formatted_str = ""
+            for i, doc in enumerate(docs):
+                source = doc.metadata.get('source', '未知文档')
+                header = doc.metadata.get('Header_H1', '') or doc.metadata.get('Header_H2', '')
+                tag = f"来源: {source}" + (f" | 章节: {header}" if header else "")
+                formatted_str += f"[参考资料 {i+1}] ({tag})\n{doc.page_content}\n\n"
+            return formatted_str
+
+        # 构建 QA 基础链条
+        base_chain = (
+            RunnablePassthrough.assign(
+                # 第一步：把 input 和 history 传给 rewrite_chain，生成 rewritten_query
+                rewritten_query=rewrite_chain
+            )
+            | RunnablePassthrough.assign(
+                # 第二步：用 rewritten_query 去执行检索，并格式化成 context 文本
+                context=lambda x: format_document(perform_retrieval(x["rewritten_query"]))
+            )
+            # 第三步：现在我们有了 input, history, context，传给 QA Prompt
+            | self.qa_prompt_template
+            | print_prompt 
+            | self.chat_model
+            | StrOutputParser()
+        )
+        
+        # 挂载历史消息记忆
+        conversation_chain = RunnableWithMessageHistory(
+            base_chain, 
+            get_history, 
+            input_messages_key="input", 
+            history_messages_key="history", 
+        )
+
+        return conversation_chain
+```
+
+### config_data.py
+
+```python
+import os
+# 1. 配置百炼的 API Key 和 Base URL
+# 注意：把这里的 YOUR_BAILIAN_API_KEY 换成你自己的
+os.environ["DASHSCOPE_API_KEY"] = "sk-b3a13529205641398551a75bdebcc940"
+# 阿里云百炼的 OpenAI 兼容端点
+os.environ["OPENAI_API_BASE"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+md5_path = "data/md5.text"
+
+collection_name = "rag"
+persist_directory = "data/chroma_db"
+
+chunk_size = 1000
+chunk_overlap = 100
+separators = ["\n\n", "\n", " ", ".", "。", "!", "！", "?", "？", "\n$$\n", "$$"]
+max_spliter_char_number = 1000
+
+similarity_threshold = 2
+
+embedding_model = "text-embedding-v4"
+chat_model = "qwen-turbo"
+
+session_config = {
+    "configurable": {"session_id": "user_001"}
+}
+```
+
