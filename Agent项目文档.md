@@ -489,105 +489,225 @@ final_prompt = prompt_template.format(
 #### 1.nodes.py
 
 ```python
-# 2. 定义节点 (Nodes)：Planner(规划), Extractor(提取), Coder(生成代码), Critic(校验), Executor(执行)的具体函数
-# 导入你定义的状态类
-from .state import CAEAgentState
+coder
 import os
-from jinja2 import Template
-from langchain_openai import ChatOpenAI
-from dotenv import load_dotenv
 import datetime
-import subprocess
-from langchain_core.prompts import PromptTemplate
-import glob
-import importlib
-from mcp_tools.provider import get_material_lookup_tool
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv()
+from jinja2 import Template
+from ..state import CAEAgentState
+import config
 
-# 初始化材料查询工具
-material_lookup_tool = get_material_lookup_tool()
-# 初始化大模型客户端
-llm = ChatOpenAI(
-    model="qwen-turbo", 
-    api_key=os.environ["DASHSCOPE_API_KEY"], 
-    base_url=os.environ["OPENAI_API_BASE"], 
-    temperature=0.1 # 提取参数需要严谨，温度调低
-)
-
-def planner_node(state: CAEAgentState):
-    """节点 1：意图识别，决定用哪个 Skill"""
-    query = state["user_query"]
-    print(f"\n[Planner] 正在调用大模型分析任务意图: {query}")
+def coder_node(state: CAEAgentState):
+    """节点 3：代码生成器"""
+    print("\n[Coder] 收到大模型提取的参数，开始动态生成 CAE 脚本...")
     
-    # 1. 定义大模型的任务提示词
-    system_prompt = """
-    你是一个资深的 CAE 仿真平台前台接待员。
-    你需要判断用户的意图，将用户的需求分类到支持的技能库中。
+    params = state["extracted_params"]
+    current_skill = state["selected_skill"]
     
-    目前系统仅支持以下两种仿真类型：
-    1. 子弹冲击钢板相关的显式动力学仿真。
-    2. 隧道开挖与支护（如围岩等级、支护厚度等）相关的仿真。
+    # 建立 Skill 和 Template 的映射关系
+    skill_to_template_map = {
+        "bullet_skill": "bullet.py",
+        "tunnel_skill": "tunnel.py",
+    }
     
-    如果用户提出了超出这两种范围的仿真需求（比如流体仿真、汽车碰撞等），请选择 'unsupported'。
-    """
-
-    # 2. 定义强制输出的格式 (枚举)
-    planner_schema = {
-        "title": "Intent_Classification",
-        "description": "判断用户仿真的意图类别",
-        "type": "object",
-        "properties": {
-            "intent": {
-                "type": "string",
-                "enum": ["bullet_skill", "tunnel_skill", "unsupported"],
-                "description": "用户的仿真意图归类。只能是这三个值之一。"
-            },
-            "reason": {
-                "type": "string",
-                "description": "简要说明为什么分到这个类别（或者为什么不支持）"
-            }
-        },
-        "required": ["intent", "reason"]
+    # 动态寻找模板文件
+    template_filename = skill_to_template_map.get(current_skill)
+    if not template_filename:
+        return {"error_log": f"未找到 {current_skill} 对应的仿真模板！"}  
+    template_path = os.path.join(config.PROJECT_ROOT, "templates", template_filename)
+    
+    # 读取模版内容
+    try:
+        with open(template_path, "r", encoding="utf-8") as f:
+            template_content = f.read()
+    except FileNotFoundError:
+        return {"error_log": f"模板文件 {template_filename} 丢失"}
+        
+    jinja_template = Template(template_content)
+    final_script = jinja_template.render(**params)
+    
+    # 获取沙盒目录
+    scripts_dir = config.SCRIPTS_DIR
+    
+    # 生成时间戳
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # 文件名唯一化
+    unique_filename = f"run_{current_skill}_{timestamp}.py"
+    output_path = os.path.join(scripts_dir, unique_filename)
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(final_script)
+        
+    print(f"[Coder] 脚本生成成功！已保存至: {output_path}")
+    
+    return {
+        "generated_code": final_script,
+        "script_path": output_path
     }
 
-    # 3. 组装消息并调用大模型
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"用户输入：{query}"}
-    ]
+critic
+import importlib
+import os
+from ..state import CAEAgentState
+import config
+
+def critic_node(state: CAEAgentState):
+    """节点 4：沙盒校验 (Critic) - 物理边界与工程常识防线"""
+    print("\n[Critic] 正在进行物理量纲与工程规则校验...")
+    params = state["extracted_params"]
+    current_skill = state["selected_skill"]
     
-    structured_llm = llm.with_structured_output(planner_schema)
-    result = structured_llm.invoke(messages)
+    error_msgs = [] # 用来收集所有的不合理报错
     
-    skill = result["intent"]
-    reason = result["reason"]
+    # 【重构：动态加载技能验证器】
+    try:
+        # 尝试从 skills.{skill}.validator 加载 validate 函数
+        module_path = f"skills.{current_skill}.validator"
+        module = importlib.import_module(module_path)
+        validate_func = getattr(module, "validate")
+        
+        # 执行具体技能的验证逻辑
+        error_msgs = validate_func(params)
+        
+    except (ImportError, AttributeError):
+        # 如果没有找到对应的验证器，回退到原始硬编码逻辑（或者报错）
+        print(f"[Critic] ⚠️ 未找到技能 {current_skill} 的独立验证器及导出函数，将跳过该阶段校验。")
+        # 这里可以选择保留一些通用的校验逻辑
+        pass
+
+    # 如果收集到了任何报错，就打回给大模型重做 (触发 Reflexion)
+    if error_msgs:
+        final_error = " | ".join(error_msgs)
+        print(f"[Critic] ❌ 校验失败，拦截非法请求: {final_error}")
+        return {"error_log": final_error}
+
+    print("[Critic] ✅ 物理边界与工程规则校验通过！")
+    return {"error_log": None} # 校验通过清空错误
+
+executor
+import os
+import subprocess
+import glob
+from ..state import CAEAgentState
+import config
+
+def executor_node(state: CAEAgentState):
+    """节点 5：最终执行 (Executor) - 唤醒 Abaqus 求解器"""
+    script_path = state.get("script_path")
     
-    # 4. 根据大模型的判断结果进行处理
-    if skill == "unsupported":
-        error_msg = f"抱歉，系统暂不支持该类型的仿真。原因：{reason}"
-        print(f"[Planner] ⚠️ 拦截非法请求: {error_msg}")
-        return {"error_log": error_msg} # 将错误写入状态，工作流会在后续停止
-    else:
-        print(f"[Planner] ✅ 意图识别成功，挂载技能包: {skill} (原因: {reason})")
-        return {"selected_skill": skill}
+    if not script_path or not os.path.exists(script_path):
+        return {"error_log": "Executor 找不到生成的脚本文件！"}
+
+    print(f"\n[Executor] 🚀 准备点火！正在后台唤醒 Abaqus 求解器...")
+    print(f"[Executor] 📄 执行脚本: {script_path}")
+
+    # 查脚本是不是空的（防空包弹）
+    if os.path.getsize(script_path) < 50:
+        error_msg = "严重异常：生成的 Python 脚本几乎为空，请检查 Jinja2 模板文件！"
+        print(f"\n[Executor] ❌ {error_msg}")
+        return {"error_log": error_msg}
+
+    work_dir = os.path.dirname(script_path)
+    script_name = os.path.basename(script_path)
+
+    # 日志存放位置
+    log_file_path = os.path.join(config.LOGS_DIR, f"{script_name.replace('.py', '')}.log")
+
+    # 从配置中获取 Abaqus 路径
+    abaqus_cmd_path = config.ABAQUS_BAT_PATH
+    command = [abaqus_cmd_path, "cae", f"noGUI={script_name}"]
+    
+    try:
+        with open(log_file_path, "w", encoding="utf-8") as log_file:
+            # 启动子进程
+            result = subprocess.run(
+                command, 
+                cwd=work_dir, 
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                shell=True,
+                timeout=300
+            )
+
+        # 全量读取日志用于报错分析
+        with open(log_file_path, "r", encoding="utf-8") as f:
+            full_output = f.read()
+
+        # 拦截 Abaqus 内部报错
+        if "AbaqusException" in full_output or "Error:" in full_output or "Failed" in full_output:
+            error_snippet = full_output.strip()[-500:] 
+            error_msg = f"Abaqus 内部执行报错:\n{error_snippet}"
+            print(f"\n[Executor] ❌ 抓到 Abaqus 静默报错了：{error_msg}")
+            return {"error_log": error_msg}
+
+        # 检查生成产物
+        OUTPUT_STORAGE_PATH = config.ABAQUS_OUTPUT_DIR
+        has_jnl = glob.glob(os.path.join(OUTPUT_STORAGE_PATH, "*.jnl"))
+        has_odb = glob.glob(os.path.join(OUTPUT_STORAGE_PATH, "*.odb"))
+        if not has_jnl and not has_odb:
+            error_msg = f"Abaqus 虽然未报错，但存放目录下（{OUTPUT_STORAGE_PATH}）没有检出任何模型或结果文件，执行无效！"
+            print(f"\n[Executor] ❌ {error_msg}")
+            return {"error_log": error_msg}
+    
+        print("[Executor] ✅ Abaqus 求解完美收官！没有发现内部报错。")
+        return {
+            "error_log": None,
+            "result_dir": work_dir
+        }
+
+    except subprocess.TimeoutExpired:
+        error_msg = "Abaqus 运行超时（超过 5 分钟）！可能是网格过密或陷入死循环，进程已被强制终止。"
+        print(f"\n[Executor] ⏰ ❌ {error_msg}")
+        return {"error_log": error_msg}
+
+    except Exception as e:
+        error_msg = f"系统级调用失败: {str(e)}"
+        print(f"[Executor] ⚠️ {error_msg}")
+        return {"error_log": error_msg}
+
+extractor
+import os
+import importlib
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.prompts import PromptTemplate
+from ..state import CAEAgentState
+from mcp_tools.provider import get_material_lookup_tool
+import config
+
+# 初始化工具
+material_lookup_tool = get_material_lookup_tool()
+
+# 初始化大模型客户端
+llm = ChatOpenAI(
+    model=config.DEFAULT_MODEL, 
+    api_key=config.DASHSCOPE_API_KEY, 
+    base_url=config.OPENAI_API_BASE, 
+    temperature=0.1
+)
 
 def extractor_node(state: CAEAgentState):
     """节点 2：提取器 (完全解耦的动态插件加载架构)"""
     print("\n[Extractor] 正在调用大模型大脑，提取物理参数...")
     
-    query = state["user_query"]
+    # 优先从 messages 中获取，否则使用 user_query
+    if "messages" in state and state["messages"]:
+        query = state["messages"][-1].content
+    else:
+        query = state.get("user_query", "")
+
     current_skill = state["selected_skill"]
     error_log = state.get("error_log")
-    skill_dir = os.path.join(PROJECT_ROOT, "skills", current_skill)
+    skill_dir = os.path.join(config.PROJECT_ROOT, "skills", current_skill)
 
     # 1. 动态加载该技能专属的 Pydantic 类 (SkillSchema)
     try:
-        module = importlib.import_module(f"skills.{current_skill}.schema")
+        # 使用绝对导入
+        module_path = f"skills.{current_skill}.schema"
+        module = importlib.import_module(module_path)
         DynamicSchema = getattr(module, "SkillSchema")
     except Exception as e:
-        # 🚨 大声报错！
-        print(f"\n[Extractor] ❌ 致命错误：无法动态加载 {current_skill} 的 Schema！请检查 schema.py 是否存在及类名是否正确。底层报错: {e}")
+        print(f"\n[Extractor] ❌ 致命错误：无法动态加载 {current_skill} 的 Schema！底层报错: {e}")
         return {"error_log": f"Schema加载失败: {e}"}
 
     # 2. 读取纯业务的 Markdown 模板
@@ -595,11 +715,10 @@ def extractor_node(state: CAEAgentState):
         with open(os.path.join(skill_dir, "prompt_template.md"), "r", encoding="utf-8") as f:
             template_str = f.read()
     except FileNotFoundError:
-        # 🚨 大声报错！
-        print(f"\n[Extractor] ❌ 致命错误：找不到 {current_skill} 目录下的 prompt_template.md 文件！请检查文件名。")
+        print(f"\n[Extractor] ❌ 致命错误：找不到 {current_skill} 目录下的 prompt_template.md 文件！")
         return {"error_log": f"模板文件丢失"}
 
-    # 3. 重新组装高阶 Prompt 引擎，把 error_log 拼进去
+    # 3. 重新组装高阶 Prompt 引擎
     prompt_engine = PromptTemplate(
         template=template_str,
         input_variables=["error_log"]
@@ -610,45 +729,36 @@ def extractor_node(state: CAEAgentState):
 
     # 4. 构建完整的上下文 messages
     messages = [
-        {"role": "system", "content": final_system_prompt},
-        {"role": "user", "content": f"用户需求：{query}"}
+        SystemMessage(content=final_system_prompt),
+        HumanMessage(content=f"用户需求：{query}")
     ]
 
     # 🚀 核心魔法：工具调用循环 (Tool Calling Loop)
-    # 给大模型配发工具钥匙
     llm_with_tools = llm.bind_tools([material_lookup_tool])
     
-    # 允许大模型最多打 3 次电话查资料，防止死循环
     for _ in range(3):
-        # 让大模型思考：是直接回答，还是查资料？
         response = llm_with_tools.invoke(messages)
-        messages.append(response) # 把大模型的思考过程存入历史
+        messages.append(response)
         
         if not response.tool_calls:
-            # 如果大模型没有发指令调用工具，说明它查完资料了，跳出循环！
             break
             
-        # 如果大模型决定调用工具，我们就执行本地代码帮它查！
         for tool_call in response.tool_calls:
             if tool_call["name"] == "lookup_material_db":
                 mat_name = tool_call["args"].get("material_name")
-                
-                # 真正执行你刚才写的那个本地 Python 函数
                 tool_result = material_lookup_tool.invoke({"material_name": mat_name})
                 
-                # 把档案室查到的结果包装成标准格式，再喂回给大模型！
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "name": tool_call["name"],
-                    "content": tool_result
-                })
+                messages.append(ToolMessage(
+                    tool_call_id=tool_call["id"],
+                    name=tool_call["name"],
+                    content=str(tool_result)
+                ))
 
-    # 5. 调用大模型，强制输出 Pydantic 结构
+    # 5. 调用大模型，强制输出结构化对象
     structured_llm = llm.with_structured_output(DynamicSchema)
     extracted_obj = structured_llm.invoke(messages)
     
-    # 将大模型返回的 Pydantic 对象安全转换为字典，方便下游使用
+    # 将大模型返回的对象安全转换为字典
     extracted_data = extracted_obj.dict() if hasattr(extracted_obj, "dict") else extracted_obj
 
     # 6. 处理追问和返回逻辑
@@ -667,246 +777,143 @@ def extractor_node(state: CAEAgentState):
         "error_log": None 
     }
 
-def coder_node(state: CAEAgentState):
-    """节点 3：代码生成器"""
-    print("\n[Coder] 收到大模型提取的参数，开始动态生成 CAE 脚本...")
+planner
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from ..state import CAEAgentState
+import config
+
+# 初始化大模型客户端
+llm = ChatOpenAI(
+    model=config.DEFAULT_MODEL, 
+    api_key=config.DASHSCOPE_API_KEY, 
+    base_url=config.OPENAI_API_BASE, 
+    temperature=0.1
+)
+
+def planner_node(state: CAEAgentState):
+    """节点 1：意图识别，决定用哪个 Skill"""
+    # 兼容新的消息状态逻辑
+    if "messages" in state and state["messages"]:
+        last_message = state["messages"][-1].content
+        query = last_message
+    else:
+        query = state.get("user_query", "")
+
+    print(f"\n[Planner] 正在调用大模型分析任务意图: {query}")
     
-    params = state["extracted_params"]
-    current_skill = state["selected_skill"]
+    system_prompt = """
+    你是一个资深的 CAE 仿真平台前台接待员。
+    你需要判断用户的意图，将用户的需求分类到支持的技能库中。
     
-    # 建立 Skill 和 Template 的映射关系, 这样你的系统就能无限扩展，支持各种各样的物理仿真！
-    skill_to_template_map = {
-        "bullet_skill": "bullet.py",
-        "tunnel_skill": "tunnel.py", # 轻松扩展到复杂的隧道支护！
+    目前系统仅支持以下两种仿真类型：
+    1. 子弹冲击钢板相关的显式动力学仿真。
+    2. 隧道开挖与支护（如围岩等级、支护厚度等）相关的仿真。
+    
+    如果用户提出了超出这两种范围的仿真需求（比如流体仿真、汽车碰撞等），请选择 'unsupported'。
+    """
+
+    planner_schema = {
+        "title": "Intent_Classification",
+        "description": "判断用户仿真的意图类别",
+        "type": "object",
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": ["bullet_skill", "tunnel_skill", "unsupported"],
+                "description": "用户的仿真意图归类。只能是这三个值之一。"
+            },
+            "reason": {
+                "type": "string",
+                "description": "简要说明为什么分到这个类别（或者为什么不支持）"
+            }
+        },
+        "required": ["intent", "reason"]
     }
-    
-    # 动态寻找模板文件
-    template_filename = skill_to_template_map.get(current_skill)
-    if not template_filename:
-        return {"error_log": f"未找到 {current_skill} 对应的仿真模板！"}  
-    template_path = os.path.join(PROJECT_ROOT, "templates", template_filename)
-    
-    # 读取模版内容（需按照文件地址读取）
-    with open(template_path, "r", encoding="utf-8") as f:
-        template_content = f.read()
-        
-    jinja_template = Template(template_content)
-    final_script = jinja_template.render(**params)
-    
-    # 把生成好的真实代码，保存到沙盒文件夹里（模拟真实业务落地）
-    sandbox_dir = os.path.join(PROJECT_ROOT, "sandbox", "generated_scripts")
-    os.makedirs(sandbox_dir, exist_ok=True) # 确保文件夹存在
-    
-    # 【核心重构：动态生成唯一文件名】
-    # 生成类似 20260312_173544 的时间戳
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # 文件名变成类似：run_bullet_skill_20260312_173544.py
-    unique_filename = f"run_{current_skill}_{timestamp}.py"
-    output_path = os.path.join(sandbox_dir, unique_filename)
-    
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(final_script)
-        
-    print(f"[Coder] 脚本生成成功！已保存至: {output_path}")
-    
-    # 🚨 注意：这里也要把生成的文件名存进状态机，告诉 Critic 节点去校验哪个文件！
-    return {
-        "generated_code": final_script,
-        "script_path": output_path  # 新增一个状态字段，把路径传给下游
-    }
 
-def critic_node(state: CAEAgentState):
-    """节点 4：沙盒校验 (Critic) - 物理边界与工程常识防线"""
-    print("\n[Critic] 正在进行物理量纲与工程规则校验...")
-    params = state["extracted_params"]
-    current_skill = state["selected_skill"]
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"用户输入：{query}")
+    ]
     
-    error_msgs = [] # 用来收集所有的不合理报错
+    structured_llm = llm.with_structured_output(planner_schema)
+    result = structured_llm.invoke(messages)
     
-    # 针对子弹冲击的专属物理规则校验
-    if current_skill == "bullet_skill":
-
-        # 1. 解析嵌套字典
-        geom = params.get("geometry", {})
-        mat = params.get("material", {})
-        phys = params.get("physics", {})
-        # 2. 几何常识校验
-        if geom.get("plate_thickness", 1) <= 0:
-            error_msgs.append("错误：钢板厚度 (plate_thickness) 必须大于 0。")
-        # 3. 子弹半径校验
-        if geom.get("bullet_radius", 1) <= 0:
-            error_msgs.append("错误：物理学不存在负数或零的半径，子弹半径必须为正数。")
-        # 4. 子弹与钢板尺寸关系校验
-        bullet_diameter = geom.get("bullet_radius", 0) * 2
-        if bullet_diameter > geom.get("plate_length", 9999):
-            error_msgs.append(f"错误：子弹直径({bullet_diameter})不能大于钢板尺寸({geom.get('plate_length')})，请重新调整几何比例。")
-        # 5. 材料常识校验
-        if mat.get("elastic_modulus", 1) <= 0:
-            error_msgs.append("错误：弹性模量 (elastic_modulus) 必须为正数，否则违背物理定律。")  
-        # 6. 分析步校验
-        if phys.get("step_time", 1) <= 0:
-            error_msgs.append("错误：动力学分析步长 (step_time) 不能为负数或零。")
-
-    # 隧道支护专属校验
-    if current_skill == "tunnel_skill":
-        # 1. 锚杆长度校验
-        if params.get("anchor_length", 1) <= 0:
-            error_msgs.append("错误：锚杆长度必须大于 0m。")
-        elif params.get("anchor_length", 0) > 20:
-            error_msgs.append("错误：系统锚杆长度通常不超过 20m，当前取值违背工程常识，请重新评估。")
-        # 2. 喷射混凝土厚度校验
-        if params.get("shotcrete_thickness", 1) <= 0:
-            error_msgs.append("错误：喷射混凝土厚度必须大于 0cm。")
-        elif params.get("shotcrete_thickness", 0) > 100:
-            error_msgs.append("错误：喷射混凝土单层/双层总厚度不可能超过 100cm (1米)，请重新核实支护参数。")
-
-    # 如果收集到了任何报错，就打回给大模型重做 (触发 Reflexion)
-    if error_msgs:
-        final_error = " | ".join(error_msgs)
-        print(f"[Critic] ❌ 校验失败，拦截非法请求: {final_error}")
-        return {"error_log": final_error}
-
-    print("[Critic] ✅ 物理边界与工程规则校验通过！")
-    return {"error_log": None} # 校验通过清空错误
-
-def executor_node(state: CAEAgentState):
-    """节点 5：最终执行 (Executor) - 唤醒 Abaqus 求解器"""
-    script_path = state.get("script_path")
+    skill = result["intent"]
+    reason = result["reason"]
     
-    if not script_path or not os.path.exists(script_path):
-        return {"error_log": "Executor 找不到生成的脚本文件！"}
-
-    print(f"\n[Executor] 🚀 准备点火！正在后台唤醒 Abaqus 求解器...")
-    print(f"[Executor] 📄 执行脚本: {script_path}")
-
-    # 查脚本是不是空的（防空包弹）
-    if os.path.getsize(script_path) < 50: # 正常Abaqus脚本不可能小于50个字节
-        error_msg = "严重异常：生成的 Python 脚本几乎为空，请检查 Jinja2 模板文件！"
-        print(f"\n[Executor] ❌ {error_msg}") # 加上这行大喇叭！
+    if skill == "unsupported":
+        error_msg = f"抱歉，系统暂不支持该类型的仿真。原因：{reason}"
+        print(f"[Planner] ⚠️ 拦截非法请求: {error_msg}")
         return {"error_log": error_msg}
+    else:
+        print(f"[Planner] ✅ 意图识别成功，挂载技能包: {skill} (原因: {reason})")
+        return {"selected_skill": skill}
 
-    work_dir = os.path.dirname(script_path)
-    script_name = os.path.basename(script_path)
-
-    # 在 try 之前，定义好日志要存放在哪里
-    log_dir = os.path.join(PROJECT_ROOT, "sandbox", "run_logs")
-    os.makedirs(log_dir, exist_ok=True) # 确保 run_logs 文件夹存在
-    # 给这次运行起个专属的日志文件名，比如 run_tunnel_skill_xxx.log
-    log_file_path = os.path.join(log_dir, f"{script_name.replace('.py', '')}.log")
-
-    # noGUI 表示后台静默计算 (不弹窗)，如果你想看弹窗演示，可以把 noGUI= 换成 script=
-    abaqus_cmd_path = r"F:\SIMULIA\Commands\abaqus.bat"
-    command = [abaqus_cmd_path, "cae", f"noGUI={script_name}"]
-    try:
-        with open(log_file_path, "w", encoding="utf-8") as log_file:
-        # 启动子进程，cwd 指定工作目录为 sandbox/generated_scripts
-            result = subprocess.run(
-                command, 
-                cwd=work_dir, 
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                shell=True,  # Windows 调起 .bat 文件必须加这个壳
-                timeout=300 # 超时大杀器：Abaqus 敢卡死，我就敢杀它进程
-            )
-        # 运行结束后，我们从物理硬盘里把日志读出来，用来查报错
-        with open(log_file_path, "r", encoding="utf-8") as f:
-            full_output = f.read()
-
-        # 拦截 Abaqus 内部报错
-        if "AbaqusException" in full_output or "Error:" in full_output or "Failed" in full_output:
-            error_snippet = full_output.strip()[-500:] 
-            error_msg = f"Abaqus 内部执行报错:\n{error_snippet}"
-            print(f"\n[Executor] ❌ 抓到 Abaqus 静默报错了：{error_msg}")
-            # 🚨 把它扔给大模型，让大模型去反思和修改参数！
-            return {"error_log": error_msg}
-
-        # 查有没有生成 .odb 或者 .jnl 文件（防假死）
-        # 真正的执行成功，Abaqus 必然会在工作目录留下痕迹！
-        if not glob.glob(os.path.join(work_dir, "*.jnl")) and not glob.glob(os.path.join(work_dir, "*.odb")):
-            error_msg = "Abaqus 虽然未报错，但工作目录下没有生成任何模型(.jnl)或结果(.odb)文件，执行无效！"
-            print(f"\n[Executor] ❌ {error_msg}")
-            return {"error_log": error_msg}
-
-        print("[Executor] ✅ Abaqus 求解完美收官！没有发现内部报错。")
-        print(f"[Executor] 📊 结果文件已保存在: {work_dir}")
-        return {
-            "error_log": None,
-            "result_dir": work_dir  # 把沙盒目录存进状态机，留给未来备用
-        }
-
-    except subprocess.TimeoutExpired:
-        # 处理超时的专属报错
-        error_msg = "Abaqus 运行超时（超过 5 分钟）！可能是网格过密或陷入死循环，进程已被强制终止。"
-        print(f"\n[Executor] ⏰ ❌ {error_msg}")
-        return {"error_log": error_msg}
-
-    except Exception as e:
-        error_msg = f"系统级调用失败: {str(e)}"
-        print(f"[Executor] ⚠️ {error_msg}")
-        return {"error_log": error_msg}
 ```
 
 #### 2.state.py
 
 ```python
-# 1. 定义状态 (State)：图节点之间传递的 "数据结构"（如用户输入、提取的参数、报错日志）
-from typing import TypedDict, Dict, Any, Optional
+from typing import TypedDict, Dict, Any, Optional, Annotated, List
+from langgraph.graph.message import add_messages
 
 class CAEAgentState(TypedDict):
-    # 1. 用户最开始的自然语言输入
-    user_query: str 
+    # 🌟 核心：引入 LangGraph 原生消息历史，add_messages 会自动处理列表追加
+    messages: Annotated[List[Any], add_messages]
     
-    # 2. Planner 节点决定的技能库路径 (比如 "bullet_skill")
+    # 1. 用户原始输入 (保留以防回显)
+    user_query: Optional[str] 
+    
+    # 2. Planner 节点决定的技能库路径
     selected_skill: Optional[str] 
     
     # 3. Extractor 节点提取出来的 JSON 物理参数
     extracted_params: Dict[str, Any] 
     
-    # 4. Coder 节点生成的最终仿真代码内容
+    # 4. Coder 节点生成的代码
     generated_code: Optional[str] 
     
-    # 5. Critic 节点运行后产生的报错信息 (如果没有错，就是 None)
+    # 5. 用户反馈或系统错误日志
     error_log: Optional[str] 
     
-    # 6. 记录反思(Reflexion)重试了多少次，防止无限死循环死磕
+    # 6. 反思重试计数器
     retry_count: int
 
-    # 7. Executor 节点成功运行后，产生的结果文件夹路径 (用于后续取回 .odb 结果)
+    # 7. 仿真结果产物目录
     result_dir: Optional[str]
 
-    # 7. 记录要执行的 Python 脚本绝对路径
+    # 8. 执行脚本路径
     script_path: Optional[str]
 ```
 
 #### 3.workflow.py
 
 ```python
-# 3. 编排图 (Graph)：把上面的节点连成有向无环图 (DAG)，定义条件边 (如出错则触发 Reflexion 回路)
 from langgraph.graph import StateGraph, END
 from .state import CAEAgentState
 from .nodes import planner_node, extractor_node, coder_node, critic_node, executor_node
 from langgraph.checkpoint.memory import MemorySaver
 
 def build_cae_graph():
-    # 1. 初始化图，并传入我们定义的状态结构
+    # 1. 初始化图状态
     workflow = StateGraph(CAEAgentState)
     
-    # 2. 把车间（节点）注册到图里面
+    # 2. 注册节点
     workflow.add_node("Planner", planner_node)
     workflow.add_node("Extractor", extractor_node)
     workflow.add_node("Coder", coder_node)
     workflow.add_node("Critic", critic_node)
     workflow.add_node("Executor", executor_node)
 
-    # 3. 定义正常的流水线顺序 (边)
-    workflow.set_entry_point("Planner") # 入口点
+    # 3. 设置入口
+    workflow.set_entry_point("Planner")
 
-    # 添加一个简单的判断函数
+    # 判断是否识别到不支持意图
     def check_planner_result(state: CAEAgentState):
         if state.get("error_log"):
-            return "End" # 如果 Planner 报了不支持，直接结束
-        return "Continue" # 否则继续走
+            return "End"
+        return "Continue"
 
     workflow.add_conditional_edges(
         "Planner",
@@ -917,12 +924,11 @@ def build_cae_graph():
         }
     )
 
-    # 定义一个检查函数：如果需要追问，就结束当前工作流
+    # 检查提取结果
     def check_extractor_result(state: CAEAgentState):
         if state.get("error_log") == "HITL_INTERRUPT":
             return "End"
         if state.get("error_log") is not None:
-            print(f"\n[Graph Router] 🛑 发现 Extractor 抛出系统错误，已熔断后续工作流！")
             return "End"
         return "Continue"
         
@@ -934,33 +940,34 @@ def build_cae_graph():
             "End": END
         }
     )
+    
     workflow.add_edge("Coder", "Critic")
     
-    # 4. 定义条件边 (Conditional Edge) —— 核心反思逻辑 Reflexion！
+    # 指令与物理校验条件边 (Reflexion 关键逻辑)
     def check_result(state: CAEAgentState):
         if state.get("retry_count", 0) >= 3:
-            return "End" # 死磕了3次还是错，强制结束，防止无限烧钱
+            return "End"
         if state.get("error_log"):
-            return "Retry" # 有报错，打回给 Extractor 重新提取
-        return "Execute" # 校验通过，执行脚本
+            return "Retry"
+        return "Execute"
 
-    # Critic 节点执行完后，会调用 check_result 决定去哪
     workflow.add_conditional_edges(
-        "Critic", # 起点节点
-        check_result, # 判断函数
+        "Critic",
+        check_result,
         {
-            "Retry": "Extractor", # 路由1：如果返回 Retry，把图引回 Extractor
-            "Execute": "Executor", # 路由3：如果返回 Execute，执行脚本
-            "End": END            # 路由2：如果返回 End，结束整个图的运行
+            "Retry": "Extractor",
+            "Execute": "Executor",
+            "End": END
         }
     )
+    
     workflow.add_edge("Executor", END)
     
-    # 5. 编译成可执行应用
-    # 初始化检查点存储
+    # 4. 编译图，注入内存持久化
     memory = MemorySaver()
     app = workflow.compile(checkpointer=memory) 
     return app
+
 ```
 
 ### mcp_tools
@@ -1312,24 +1319,24 @@ mdb.save()
 import uuid
 import os
 from graph.workflow import build_cae_graph
+from langchain_core.messages import HumanMessage
 
 def main():
     # 1. 编译图状态机
     app = build_cae_graph()
     
     # 2. 初始化线程配置 (LangGraph 追踪状态需要)
-    thread_config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    # thread_id 决定了对话的隔离性，同一个 ID 会共享历史
+    thread_id = str(uuid.uuid4())
+    thread_config = {"configurable": {"thread_id": thread_id}}
     
     print("="*55)
-    print("🤖 欢迎使用 CAE 多智能体仿真平台 (输入 'q' 退出)")
+    print("🤖 欢迎使用 CAE 多智能体仿真平台 (v2.0 架构重构版)")
     print("="*55)
-
-    # 在本地维护一个对话上下文的“记忆变量”
-    history_query = ""
+    print(f"📌 会话 ID: {thread_id}")
 
     # ================= 真实交互循环 =================
     while True:
-        # 实时等待用户在终端敲键盘！
         user_input = input("\n👤 请输入您的仿真需求 (或补充参数): ")
         
         if user_input.strip().lower() in ['q', 'quit', 'exit']:
@@ -1339,36 +1346,29 @@ def main():
         if not user_input.strip():
             continue
 
-        # 【核心逻辑：动态记忆拼接】
-        if history_query:
-            # 如果之前有对话，就把新输入当作“补充”拼在后面
-            combined_query = f"【历史需求】：{history_query}\n【用户最新补充】：{user_input}"
-        else:
-            # 如果是第一句话，直接使用
-            combined_query = user_input
-            
-        # 刷新记忆变量，供下一回合使用
-        history_query = combined_query
-
-        print("🚀 正在流转工作流...\n")
+        print("🚀 正在通过多智能体协作处理您的请求...\n")
         
-        # 🚨 极其关键的一步：重置错误状态！
-        # 必须把上一轮残留的 HITL_INTERRUPT 和重试次数清空，否则图会直接卡死结束
-        current_state = {
-            "user_query": combined_query,
+        # 【核心重构：使用原生消息格式推送】
+        # 初始状态只需传入最新的 HumanMessage，LangGraph Checkpointer 会处理历史合并
+        initial_input = {
+            "messages": [HumanMessage(content=user_input)],
             "error_log": None,
             "retry_count": 0
         }
 
         # 推入状态机并流式输出
-        for output in app.stream(current_state, config=thread_config):
-            for node_name, node_state in output.items():
-                print(f"🔄 当前运行结束节点: [{node_name}]")
-                
-                # 如果我们监听到大模型发出了追问警报
-                if node_state.get("error_log") == "HITL_INTERRUPT":
-                    print("🛑 [系统拦截] 发现物理参数异常，流转已挂起，等待您的修正...\n")
-                    # 这里不需要 break，因为图在 check_extractor_result 里已经走到 END 停下来了
+        try:
+            for output in app.stream(initial_input, config=thread_config):
+                for node_name, node_state in output.items():
+                    print(f"🔄 节点 [{node_name}] 任务完成")
+                    
+                    # 检查是否有追问或中断
+                    if node_state.get("error_log") == "HITL_INTERRUPT":
+                        # 注意：在 Extractor 中已经打印了 AI 的追问内容
+                        print("🛑 [系统挂起] 等待用户补充参数...")
+                        
+        except Exception as e:
+            print(f"❌ 运行过程中发生未知错误: {e}")
 
 if __name__ == "__main__":
     main()
