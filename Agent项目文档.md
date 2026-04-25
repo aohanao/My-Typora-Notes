@@ -124,6 +124,85 @@ graph TD
 
 
 
+![Gemini_Generated_Image_kqfsefkqfsefkqfs](./assets/Gemini_Generated_Image_kqfsefkqfsefkqfs.png)
+
+
+
+
+
+
+
+```mermaid
+graph TD
+    %% --- 起点与中央大脑 ---
+    Start([用户输入 User Request]) --> Planner{Planner Agent<br/>中央大脑: 意图解析 / 咨询交互 / 任务调度}
+
+    %% --- 知识图谱基座 (工具层) ---
+    GraphRAG_Base[(Graph RAG 工程规范与地质图谱)]
+    
+    %% Planner的聊天闭环
+    Planner -. "Chat模式: 调用图谱工具" .-> GraphRAG_Base
+    GraphRAG_Base -. "返回规范与实体关系" .-> Planner
+    Planner -- "Chat (直接回答用户)" --> End([结束 END])
+
+    %% --- 仿真发散阶段：多假设生成 ---
+    Planner -- "Simulate (下发探索任务)" --> Dispatch((分发探索分支))
+    
+    subgraph HypothesisFlow [发散阶段：多智能体假设生成池]
+        direction TB
+        Dispatch --> AgentA[保守派方案 Agent<br/>聚焦微台阶法/强支护]
+        Dispatch --> AgentB[激进派方案 Agent<br/>聚焦全断面法/轻支护]
+        
+        %% 子Agent在推理时也需要查规范
+        GraphRAG_Base -. "注入地质先验约束" .-> AgentA
+        GraphRAG_Base -. "注入地质先验约束" .-> AgentB
+    end
+
+    %% --- 仿真执行阶段：并行渲染与求解 ---
+    subgraph SimEngineFlow [执行阶段：底层 CAE 求解流水线]
+        direction TB
+        AgentA -- "生成 JSON_A" --> CoderA[Coder 节点<br/>组装底层脚本 A]
+        AgentB -- "生成 JSON_B" --> CoderB[Coder 节点<br/>组装底层脚本 B]
+        
+        SkillPack[模块化代码模板库 / Snippets] -. "提供 FLAC3D/Abaqus 模板" .-> CoderA
+        SkillPack -. "提供 FLAC3D/Abaqus 模板" .-> CoderB
+
+        CoderA --> ExecA[Executor 沙箱<br/>运行仿真 A]
+        CoderB --> ExecB[Executor 沙箱<br/>运行仿真 B]
+    end
+
+    %% --- 结果裁决阶段：收敛与闭环 ---
+    subgraph EvaluationFlow [收敛阶段：数据驱动裁决与反思]
+        direction TB
+        ExecA -- "抛出 Log A + 云图数据" --> Critic{Critic Agent<br/>物理校验与综合评审}
+        ExecB -- "抛出 Log B + 云图数据" --> Critic
+    end
+
+    %% --- 反思与自愈的条件边 (Conditional Edges) ---
+    %% 1. 语法或求解失败
+    Critic -. "报错: 脚本异常/不收敛 (打回重写代码)" .-> SimEngineFlow
+    
+    %% 2. 物理结果不达标，要求重新规划参数
+    Critic -. "退回: 沉降超限或空间干涉 (打回重审参数)" .-> Dispatch
+    
+    %% 3. 寻优成功
+    Critic -- "共识: 寻优成功，生成配置报告" --> End
+
+    %% --- 节点样式设计 ---
+    style Planner fill:#e7f5ff,stroke:#228be6,stroke-width:3px
+    style HypothesisFlow fill:#f4fce3,stroke:#74b816,stroke-width:2px,stroke-dasharray: 5 5
+    style SimEngineFlow fill:#f5f7ff,stroke:#5c7cfa,stroke-width:2px
+    style EvaluationFlow fill:#fff4e6,stroke:#ff922b,stroke-width:2px
+    style Critic fill:#ffe066,stroke:#f59f00,stroke-width:3px
+    style GraphRAG_Base fill:#f8f9fa,stroke:#adb5bd
+```
+
+
+
+
+
+
+
 评测项目架构：
 
 ```mermaid
