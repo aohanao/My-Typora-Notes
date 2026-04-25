@@ -73,6 +73,100 @@
 
 
 
+系统拓扑图：
+
+```mermaid
+graph TD
+    %% 开始节点
+    Start([用户输入 User Request]) --> Compressor[Compressor 记忆压缩]
+    Compressor --> Planner{Planner 意图识别}
+
+    %% 顶层分流
+    Planner -- "chat (咨询/RAG)" --> ChatNode[Chat Node 专家模式]
+    Planner -- "simulate (仿真指令)" --> SimSubGraph[[SimPipeline 仿真流水线]]
+    Planner -- "error (非法)" --> End([结束 END])
+
+    %% Chat 节点内部详情
+    subgraph ChatFlow [Chat 专家咨询流]
+        ChatNode --> ToolLoop{ReAct 工具循环}
+        ToolLoop -- "MCP / 本地工具" --> Tools[Tools: 材料/规范查询]
+        Tools --> ToolLoop
+    end
+    ChatFlow --> End
+
+    %% 仿真流水线自愈子图
+    subgraph SimPipelineFlow [SimPipeline 仿真自愈闭环]
+        direction TB
+        Extractor[Extractor<br/>参数提取 + 物理校验] --> Coder[Coder<br/>脚本渲染 + 代码校验]
+        Coder --> Executor[Executor<br/>沙箱执行 + 日志感知]
+        
+        %% 反思/闭环逻辑 (Reflexion)
+        Executor -. "仿真失败 (报错回流)" .-> Extractor
+        Coder -. "代码异常 (反馈重干)" .-> Coder
+    end
+    SimSubGraph --> SimPipelineFlow
+    SimPipelineFlow --> End
+
+    %% 技能系统联动
+    subgraph Skills [Skills 联邦技能库]
+        SkillPack[场景插件: 隧道/冲击/...]
+        SkillPack -. "注入 Schema/模板/验证器" .-> SimPipelineFlow
+    end
+
+    %% 样式
+    style SimPipelineFlow fill:#f5f7ff,stroke:#5c7cfa,stroke-width:2px
+    style ChatFlow fill:#fff9db,stroke:#fab005,stroke-width:2px
+    style Skills fill:#f4fce3,stroke:#74b816,stroke-dasharray: 5 5
+    style Start fill:#e7f5ff,stroke:#228be6
+    style End fill:#e7f5ff,stroke:#228be6
+
+```
+
+
+
+评测项目架构：
+
+```mermaid
+graph TD
+    %% 数据上报层
+    subgraph Data_Collection [分布式采集层 - Distributed Tracing]
+        Agent_Trace[Agent 节点轨迹] -- "HTTP/JSON" --> Collector
+        RAG_Trace[RAG 节点片段] -- "HTTP/JSON" --> Collector
+    end
+
+    %% 监控中枢层
+    subgraph Monitoring_Hub [监控与评估中枢 - CAE Eval Platform]
+        Collector[api_server.py <br/> FastAPI 接入点] --> Storage[(traces.db <br/> SQLite 事实库)]
+        
+        subgraph Audit_Pipeline [自动化审计流水线]
+            direction LR
+            Storage --> Intent_Auditor[evaluator.py <br/> 意图/工具审计]
+            Storage --> RAG_Auditor[ragas_evaluator.py <br/> RAG 质量审计]
+            Intent_Auditor -. "指标持久化" .-> Storage
+            RAG_Auditor -. "指标持久化" .-> Storage
+        end
+        
+        subgraph BI_Dashboard [BI 决策大盘 - Dashboard]
+            Storage --> Waterfall[耗时分析瀑布图]
+            Storage --> TokenUsage[Token 成本统计]
+            Storage --> QABoard[QA 质量看板]
+        end
+    end
+
+    %% 输出
+    BI_Dashboard --> Dashboard_UI([Streamlit 极简仪表盘])
+
+    %% 样式美化
+    style Monitoring_Hub fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+    style Audit_Pipeline fill:#fff9db,stroke:#fab005,stroke-dasharray: 5 5
+    style BI_Dashboard fill:#e7f5ff,stroke:#228be6
+    style Storage fill:#e3fafc,stroke:#1098ad
+    style Collector fill:#e7f5ff,stroke:#228be6
+
+```
+
+
+
 
 ## 📂 项目模块深度拆解
 
@@ -578,897 +672,7 @@ final_prompt = prompt_template.format(
 
 > “提示词模板不仅仅是一段文本，它是连接自然语言逻辑与系统动态数据的标准化接口。它实现了控制流与领域知识的彻底解耦，让我们能像管理代码库一样，通过注入 JSON Schema 约束、动态 RAG 上下文和工程先验规则，安全、可复用且确定性地驱动大模型。”
 
-## 代码源文件 CAE_Agent_project
-
-### Graph
-
-#### 1.nodes.py
-
-```python
-coder
-import os
-import datetime
-from jinja2 import Template
-from ..state import CAEAgentState
-import config
-
-def coder_node(state: CAEAgentState):
-    """节点 3：代码生成器"""
-    print("\n[Coder] 收到大模型提取的参数，开始动态生成 CAE 脚本...")
-    
-    params = state["extracted_params"]
-    current_skill = state["selected_skill"]
-    
-    # 建立 Skill 和 Template 的映射关系
-    skill_to_template_map = {
-        "bullet_skill": "bullet.py",
-        "tunnel_skill": "tunnel.py",
-    }
-    
-    # 动态寻找模板文件
-    template_filename = skill_to_template_map.get(current_skill)
-    if not template_filename:
-        return {"error_log": f"未找到 {current_skill} 对应的仿真模板！"}  
-    template_path = os.path.join(config.PROJECT_ROOT, "templates", template_filename)
-    
-    # 读取模版内容
-    try:
-        with open(template_path, "r", encoding="utf-8") as f:
-            template_content = f.read()
-    except FileNotFoundError:
-        return {"error_log": f"模板文件 {template_filename} 丢失"}
-        
-    jinja_template = Template(template_content)
-    final_script = jinja_template.render(**params)
-    
-    # 获取沙盒目录
-    scripts_dir = config.SCRIPTS_DIR
-    
-    # 生成时间戳
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # 文件名唯一化
-    unique_filename = f"run_{current_skill}_{timestamp}.py"
-    output_path = os.path.join(scripts_dir, unique_filename)
-    
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(final_script)
-        
-    print(f"[Coder] 脚本生成成功！已保存至: {output_path}")
-    
-    return {
-        "generated_code": final_script,
-        "script_path": output_path
-    }
-
-critic
-import importlib
-import os
-from ..state import CAEAgentState
-import config
-
-def critic_node(state: CAEAgentState):
-    """节点 4：沙盒校验 (Critic) - 物理边界与工程常识防线"""
-    print("\n[Critic] 正在进行物理量纲与工程规则校验...")
-    params = state["extracted_params"]
-    current_skill = state["selected_skill"]
-    
-    error_msgs = [] # 用来收集所有的不合理报错
-    
-    # 【重构：动态加载技能验证器】
-    try:
-        # 尝试从 skills.{skill}.validator 加载 validate 函数
-        module_path = f"skills.{current_skill}.validator"
-        module = importlib.import_module(module_path)
-        validate_func = getattr(module, "validate")
-        
-        # 执行具体技能的验证逻辑
-        error_msgs = validate_func(params)
-        
-    except (ImportError, AttributeError):
-        # 如果没有找到对应的验证器，回退到原始硬编码逻辑（或者报错）
-        print(f"[Critic] ⚠️ 未找到技能 {current_skill} 的独立验证器及导出函数，将跳过该阶段校验。")
-        # 这里可以选择保留一些通用的校验逻辑
-        pass
-
-    # 如果收集到了任何报错，就打回给大模型重做 (触发 Reflexion)
-    if error_msgs:
-        final_error = " | ".join(error_msgs)
-        print(f"[Critic] ❌ 校验失败，拦截非法请求: {final_error}")
-        return {"error_log": final_error}
-
-    print("[Critic] ✅ 物理边界与工程规则校验通过！")
-    return {"error_log": None} # 校验通过清空错误
-
-executor
-import os
-import subprocess
-import glob
-from ..state import CAEAgentState
-import config
-
-def executor_node(state: CAEAgentState):
-    """节点 5：最终执行 (Executor) - 唤醒 Abaqus 求解器"""
-    script_path = state.get("script_path")
-    
-    if not script_path or not os.path.exists(script_path):
-        return {"error_log": "Executor 找不到生成的脚本文件！"}
-
-    print(f"\n[Executor] 🚀 准备点火！正在后台唤醒 Abaqus 求解器...")
-    print(f"[Executor] 📄 执行脚本: {script_path}")
-
-    # 查脚本是不是空的（防空包弹）
-    if os.path.getsize(script_path) < 50:
-        error_msg = "严重异常：生成的 Python 脚本几乎为空，请检查 Jinja2 模板文件！"
-        print(f"\n[Executor] ❌ {error_msg}")
-        return {"error_log": error_msg}
-
-    work_dir = os.path.dirname(script_path)
-    script_name = os.path.basename(script_path)
-
-    # 日志存放位置
-    log_file_path = os.path.join(config.LOGS_DIR, f"{script_name.replace('.py', '')}.log")
-
-    # 从配置中获取 Abaqus 路径
-    abaqus_cmd_path = config.ABAQUS_BAT_PATH
-    command = [abaqus_cmd_path, "cae", f"noGUI={script_name}"]
-    
-    try:
-        with open(log_file_path, "w", encoding="utf-8") as log_file:
-            # 启动子进程
-            result = subprocess.run(
-                command, 
-                cwd=work_dir, 
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                shell=True,
-                timeout=300
-            )
-
-        # 全量读取日志用于报错分析
-        with open(log_file_path, "r", encoding="utf-8") as f:
-            full_output = f.read()
-
-        # 拦截 Abaqus 内部报错
-        if "AbaqusException" in full_output or "Error:" in full_output or "Failed" in full_output:
-            error_snippet = full_output.strip()[-500:] 
-            error_msg = f"Abaqus 内部执行报错:\n{error_snippet}"
-            print(f"\n[Executor] ❌ 抓到 Abaqus 静默报错了：{error_msg}")
-            return {"error_log": error_msg}
-
-        # 检查生成产物
-        OUTPUT_STORAGE_PATH = config.ABAQUS_OUTPUT_DIR
-        has_jnl = glob.glob(os.path.join(OUTPUT_STORAGE_PATH, "*.jnl"))
-        has_odb = glob.glob(os.path.join(OUTPUT_STORAGE_PATH, "*.odb"))
-        if not has_jnl and not has_odb:
-            error_msg = f"Abaqus 虽然未报错，但存放目录下（{OUTPUT_STORAGE_PATH}）没有检出任何模型或结果文件，执行无效！"
-            print(f"\n[Executor] ❌ {error_msg}")
-            return {"error_log": error_msg}
-    
-        print("[Executor] ✅ Abaqus 求解完美收官！没有发现内部报错。")
-        return {
-            "error_log": None,
-            "result_dir": work_dir
-        }
-
-    except subprocess.TimeoutExpired:
-        error_msg = "Abaqus 运行超时（超过 5 分钟）！可能是网格过密或陷入死循环，进程已被强制终止。"
-        print(f"\n[Executor] ⏰ ❌ {error_msg}")
-        return {"error_log": error_msg}
-
-    except Exception as e:
-        error_msg = f"系统级调用失败: {str(e)}"
-        print(f"[Executor] ⚠️ {error_msg}")
-        return {"error_log": error_msg}
-
-extractor
-import os
-import importlib
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langchain_core.prompts import PromptTemplate
-from ..state import CAEAgentState
-from mcp_tools.provider import get_material_lookup_tool
-import config
-
-# 初始化工具
-material_lookup_tool = get_material_lookup_tool()
-
-# 初始化大模型客户端
-llm = ChatOpenAI(
-    model=config.DEFAULT_MODEL, 
-    api_key=config.DASHSCOPE_API_KEY, 
-    base_url=config.OPENAI_API_BASE, 
-    temperature=0.1
-)
-
-def extractor_node(state: CAEAgentState):
-    """节点 2：提取器 (完全解耦的动态插件加载架构)"""
-    print("\n[Extractor] 正在调用大模型大脑，提取物理参数...")
-    
-    # 优先从 messages 中获取，否则使用 user_query
-    if "messages" in state and state["messages"]:
-        query = state["messages"][-1].content
-    else:
-        query = state.get("user_query", "")
-
-    current_skill = state["selected_skill"]
-    error_log = state.get("error_log")
-    skill_dir = os.path.join(config.PROJECT_ROOT, "skills", current_skill)
-
-    # 1. 动态加载该技能专属的 Pydantic 类 (SkillSchema)
-    try:
-        # 使用绝对导入
-        module_path = f"skills.{current_skill}.schema"
-        module = importlib.import_module(module_path)
-        DynamicSchema = getattr(module, "SkillSchema")
-    except Exception as e:
-        print(f"\n[Extractor] ❌ 致命错误：无法动态加载 {current_skill} 的 Schema！底层报错: {e}")
-        return {"error_log": f"Schema加载失败: {e}"}
-
-    # 2. 读取纯业务的 Markdown 模板
-    try:
-        with open(os.path.join(skill_dir, "prompt_template.md"), "r", encoding="utf-8") as f:
-            template_str = f.read()
-    except FileNotFoundError:
-        print(f"\n[Extractor] ❌ 致命错误：找不到 {current_skill} 目录下的 prompt_template.md 文件！")
-        return {"error_log": f"模板文件丢失"}
-
-    # 3. 重新组装高阶 Prompt 引擎
-    prompt_engine = PromptTemplate(
-        template=template_str,
-        input_variables=["error_log"]
-    )
-    final_system_prompt = prompt_engine.format(
-        error_log=f"注意，上次执行有报错，请修正参数：{error_log}" if error_log else "当前无报错记录。"
-    )
-
-    # 4. 构建完整的上下文 messages
-    messages = [
-        SystemMessage(content=final_system_prompt),
-        HumanMessage(content=f"用户需求：{query}")
-    ]
-
-    # 🚀 核心魔法：工具调用循环 (Tool Calling Loop)
-    llm_with_tools = llm.bind_tools([material_lookup_tool])
-    
-    for _ in range(3):
-        response = llm_with_tools.invoke(messages)
-        messages.append(response)
-        
-        if not response.tool_calls:
-            break
-            
-        for tool_call in response.tool_calls:
-            if tool_call["name"] == "lookup_material_db":
-                mat_name = tool_call["args"].get("material_name")
-                tool_result = material_lookup_tool.invoke({"material_name": mat_name})
-                
-                messages.append(ToolMessage(
-                    tool_call_id=tool_call["id"],
-                    name=tool_call["name"],
-                    content=str(tool_result)
-                ))
-
-    # 5. 调用大模型，强制输出结构化对象
-    structured_llm = llm.with_structured_output(DynamicSchema)
-    extracted_obj = structured_llm.invoke(messages)
-    
-    # 将大模型返回的对象安全转换为字典
-    extracted_data = extracted_obj.dict() if hasattr(extracted_obj, "dict") else extracted_obj
-
-    # 6. 处理追问和返回逻辑
-    status = extracted_data.get("status", "success")
-    if status == "need_clarification":
-        ai_message = extracted_data.get("message", "参数有误，请重新确认。")
-        print(f"\n[Extractor] 🛑 发现信息不足，挂起任务并追问用户：\n👉 🤖 Agent: {ai_message}")
-        return {"error_log": "HITL_INTERRUPT"}
-        
-    print(f"[Extractor] 提取成功！获得干净的参数字典：{extracted_data}")
-
-    current_retry = state.get("retry_count", 0)
-    return {
-        "extracted_params": extracted_data,
-        "retry_count": current_retry + 1,
-        "error_log": None 
-    }
-
-planner
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
-from ..state import CAEAgentState
-import config
-
-# 初始化大模型客户端
-llm = ChatOpenAI(
-    model=config.DEFAULT_MODEL, 
-    api_key=config.DASHSCOPE_API_KEY, 
-    base_url=config.OPENAI_API_BASE, 
-    temperature=0.1
-)
-
-def planner_node(state: CAEAgentState):
-    """节点 1：意图识别，决定用哪个 Skill"""
-    # 兼容新的消息状态逻辑
-    if "messages" in state and state["messages"]:
-        last_message = state["messages"][-1].content
-        query = last_message
-    else:
-        query = state.get("user_query", "")
-
-    print(f"\n[Planner] 正在调用大模型分析任务意图: {query}")
-    
-    system_prompt = """
-    你是一个资深的 CAE 仿真平台前台接待员。
-    你需要判断用户的意图，将用户的需求分类到支持的技能库中。
-    
-    目前系统仅支持以下两种仿真类型：
-    1. 子弹冲击钢板相关的显式动力学仿真。
-    2. 隧道开挖与支护（如围岩等级、支护厚度等）相关的仿真。
-    
-    如果用户提出了超出这两种范围的仿真需求（比如流体仿真、汽车碰撞等），请选择 'unsupported'。
-    """
-
-    planner_schema = {
-        "title": "Intent_Classification",
-        "description": "判断用户仿真的意图类别",
-        "type": "object",
-        "properties": {
-            "intent": {
-                "type": "string",
-                "enum": ["bullet_skill", "tunnel_skill", "unsupported"],
-                "description": "用户的仿真意图归类。只能是这三个值之一。"
-            },
-            "reason": {
-                "type": "string",
-                "description": "简要说明为什么分到这个类别（或者为什么不支持）"
-            }
-        },
-        "required": ["intent", "reason"]
-    }
-
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=f"用户输入：{query}")
-    ]
-    
-    structured_llm = llm.with_structured_output(planner_schema)
-    result = structured_llm.invoke(messages)
-    
-    skill = result["intent"]
-    reason = result["reason"]
-    
-    if skill == "unsupported":
-        error_msg = f"抱歉，系统暂不支持该类型的仿真。原因：{reason}"
-        print(f"[Planner] ⚠️ 拦截非法请求: {error_msg}")
-        return {"error_log": error_msg}
-    else:
-        print(f"[Planner] ✅ 意图识别成功，挂载技能包: {skill} (原因: {reason})")
-        return {"selected_skill": skill}
-
-```
-
-#### 2.state.py
-
-```python
-from typing import TypedDict, Dict, Any, Optional, Annotated, List
-from langgraph.graph.message import add_messages
-
-class CAEAgentState(TypedDict):
-    # 🌟 核心：引入 LangGraph 原生消息历史，add_messages 会自动处理列表追加
-    messages: Annotated[List[Any], add_messages]
-    
-    # 1. 用户原始输入 (保留以防回显)
-    user_query: Optional[str] 
-    
-    # 2. Planner 节点决定的技能库路径
-    selected_skill: Optional[str] 
-    
-    # 3. Extractor 节点提取出来的 JSON 物理参数
-    extracted_params: Dict[str, Any] 
-    
-    # 4. Coder 节点生成的代码
-    generated_code: Optional[str] 
-    
-    # 5. 用户反馈或系统错误日志
-    error_log: Optional[str] 
-    
-    # 6. 反思重试计数器
-    retry_count: int
-
-    # 7. 仿真结果产物目录
-    result_dir: Optional[str]
-
-    # 8. 执行脚本路径
-    script_path: Optional[str]
-```
-
-#### 3.workflow.py
-
-```python
-from langgraph.graph import StateGraph, END
-from .state import CAEAgentState
-from .nodes import planner_node, extractor_node, coder_node, critic_node, executor_node
-from langgraph.checkpoint.memory import MemorySaver
-
-def build_cae_graph():
-    # 1. 初始化图状态
-    workflow = StateGraph(CAEAgentState)
-    
-    # 2. 注册节点
-    workflow.add_node("Planner", planner_node)
-    workflow.add_node("Extractor", extractor_node)
-    workflow.add_node("Coder", coder_node)
-    workflow.add_node("Critic", critic_node)
-    workflow.add_node("Executor", executor_node)
-
-    # 3. 设置入口
-    workflow.set_entry_point("Planner")
-
-    # 判断是否识别到不支持意图
-    def check_planner_result(state: CAEAgentState):
-        if state.get("error_log"):
-            return "End"
-        return "Continue"
-
-    workflow.add_conditional_edges(
-        "Planner",
-        check_planner_result,
-        {
-            "Continue": "Extractor",
-            "End": END
-        }
-    )
-
-    # 检查提取结果
-    def check_extractor_result(state: CAEAgentState):
-        if state.get("error_log") == "HITL_INTERRUPT":
-            return "End"
-        if state.get("error_log") is not None:
-            return "End"
-        return "Continue"
-        
-    workflow.add_conditional_edges(
-        "Extractor",
-        check_extractor_result,
-        {
-            "Continue": "Coder",
-            "End": END
-        }
-    )
-    
-    workflow.add_edge("Coder", "Critic")
-    
-    # 指令与物理校验条件边 (Reflexion 关键逻辑)
-    def check_result(state: CAEAgentState):
-        if state.get("retry_count", 0) >= 3:
-            return "End"
-        if state.get("error_log"):
-            return "Retry"
-        return "Execute"
-
-    workflow.add_conditional_edges(
-        "Critic",
-        check_result,
-        {
-            "Retry": "Extractor",
-            "Execute": "Executor",
-            "End": END
-        }
-    )
-    
-    workflow.add_edge("Executor", END)
-    
-    # 4. 编译图，注入内存持久化
-    memory = MemorySaver()
-    app = workflow.compile(checkpointer=memory) 
-    return app
-
-```
-
-### mcp_tools
-
-#### 1.provider.py
-
-```python
-import os
-
-from mcp_tools.server import lookup_material_db
-
-
-def get_material_lookup_tool():
-    """
-    统一工具入口：
-    - local: 直接使用本地 Tool 对象（默认）
-    - mcp: 预留给 MCP Client 模式（当前先复用同一 Tool 定义，避免业务层再改）
-    """
-    backend = os.getenv("TOOL_BACKEND", "local").strip().lower()
-    if backend not in {"local", "mcp"}:
-        backend = "local"
-    return lookup_material_db
-```
-
-#### 2.server_entry.py
-
-```python
-"""
-MCP Server 启动入口（stdio 传输）。
-
-运行方式：
-    python -m mcp_tools.server_entry
-
-说明：
-    - 该入口用于把 `lookup_material_db` 以 MCP Tool 形式暴露给外部客户端。
-    - 如果当前环境未安装 `mcp` 包，会给出清晰报错提示。
-"""
-
-from mcp_tools.server import lookup_material_db
-
-
-def main():
-    try:
-        from mcp.server.fastmcp import FastMCP
-    except Exception as e:
-        raise RuntimeError(
-            "未检测到可用的 MCP 运行时，请先安装依赖：pip install mcp"
-        ) from e
-
-    app = FastMCP("cae-material-db")
-    app.tool()(lookup_material_db.func)
-    app.run(transport="stdio")
-
-
-if __name__ == "__main__":
-    main()
-```
-
-#### 3.server.py
-
-```python
-import os
-import json
-from langchain_core.tools import tool
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-@tool
-def lookup_material_db(material_name: str) -> str:
-    """
-    MCP Tool: 查询本地材料数据库，返回 JSON 字符串。
-    参数 material_name: 材料名称（如 'V级围岩', 'C30喷射混凝土'）。
-    """
-    db_path = os.path.join(PROJECT_ROOT, "mcp_tools", "material_db.json")
-
-    try:
-        with open(db_path, "r", encoding="utf-8") as f:
-            db = json.load(f)
-    except FileNotFoundError:
-        return json.dumps({"error": "致命错误：未找到 material_db.json 数据库文件"}, ensure_ascii=False)
-
-    result = db.get(material_name, {"error": "本地库无此数据，请根据工程经验合理推断"})
-    return json.dumps(result, ensure_ascii=False)
-
-
-# 兼容旧命名，避免历史代码引用报错
-query_local_material_db = lookup_material_db
-```
-
-### skills
-
---bullet_skill
-
-#### 1.prompt_template.md
-
-```markdown
-System:
-你是一个资深的 CAE 仿真参数提取专家。
-
-Task:
-用户会输入一段关于“子弹冲击钢板”的自然语言描述。你的任务是从中提取出关键的物理参数，并严格按照结构化 Schema 输出，绝对不要输出任何其他多余的文字或解释。
-
-Context (历史校验报错):
-{error_log}
-
-Rules:
-1. 几何参数 (geometry)
-- `plate_length` (钢板长宽)：默认值 200.0。
-- `plate_thickness` (钢板厚度)：默认值 20.0；如果用户表示“薄一点”，可取 10.0；“厚一点”，可取 30.0。
-- `bullet_radius` (子弹半径)：默认值 20.0。
-
-2. 材料参数 (material)
-- 如果用户未指定具体材料，默认使用标准 HPB300 钢：`density=7.85e-09`，`elastic_modulus=210000.0`。
-- 如果用户提到“高强钢”或类似描述，`elastic_modulus` 调整到 250000.0 左右。
-
-3. 物理与求解参数 (physics)
-- `step_time` (分析步长)：默认值 0.01 秒；如果用户要求看“更精细的瞬间”，可缩小为 0.005 或 0.001。
-
-4. 异常处理与追问机制 (Human-in-the-Loop)
-- 如果历史报错或当前输入存在明显物理矛盾，你不能擅自编造或改写核心几何尺寸。
-- 必须设置：
-  - `status = "need_clarification"`
-  - `message` 用专业 CAE 工程师口吻明确指出矛盾并反问用户如何调整。
-```
-
-#### 2.schema.py
-
-```python
-from pydantic import BaseModel, Field
-
-class GeometrySchema(BaseModel):
-    plate_length: float = Field(description="钢板的长和宽")
-    plate_thickness: float = Field(description="钢板的厚度")
-    bullet_radius: float = Field(description="子弹的半径")
-
-class MaterialSchema(BaseModel):
-    density: float = Field(description="材料密度")
-    elastic_modulus: float = Field(description="材料弹性模量")
-
-class PhysicsSchema(BaseModel):
-    step_time: float = Field(description="显式动力学分析步长")
-
-class SkillSchema(BaseModel):
-    status: str = Field(
-        default="success",
-        description="如果用户参数合理，输出 success；如果参数明显违反物理常识或存在缺失，输出 need_clarification",
-    )
-    message: str = Field(
-        default="",
-        description="如果 status 为 need_clarification，写下你要反问、提示或警告用户的话",
-    )
-    geometry: GeometrySchema
-    material: MaterialSchema
-    physics: PhysicsSchema
-
-
-```
-
-### bullet.py
-
-```python
-from abaqus import *
-from abaqusConstants import *
-from caeModules import *
-from driverUtils import executeOnCaeStartup
-import os
-os.chdir(r"G:\Abaqus\agent_project")
-mdb.saveAs(pathName='G:/Abaqus/agent_project/bullet')
-executeOnCaeStartup()
-s = mdb.models['Model-1'].ConstrainedSketch(name='__profile__', 
-    sheetSize=500.0)
-g, v, d, c = s.geometry, s.vertices, s.dimensions, s.constraints
-s.setPrimaryObject(option=STANDALONE)
-s.rectangle(point1=(0.0, 0.0), point2=({{ geometry.plate_length }}, {{ geometry.plate_length }}))
-p = mdb.models['Model-1'].Part(name='Part-1', dimensionality=THREE_D, 
-    type=DEFORMABLE_BODY)
-p = mdb.models['Model-1'].parts['Part-1']
-p.BaseSolidExtrude(sketch=s, depth={{ geometry.plate_thickness }})
-s.unsetPrimaryObject()
-p = mdb.models['Model-1'].parts['Part-1']
-del mdb.models['Model-1'].sketches['__profile__']
-s1 = mdb.models['Model-1'].ConstrainedSketch(name='__profile__', 
-    sheetSize=500.0)
-g, v, d, c = s1.geometry, s1.vertices, s1.dimensions, s1.constraints
-s1.setPrimaryObject(option=STANDALONE)
-s1.ConstructionLine(point1=(0.0, -250.0), point2=(0.0, 250.0))
-s1.FixedConstraint(entity=g[2])
-s1.CircleByCenterPerimeter(center=(0.0, 0.0), point1=({{ geometry.bullet_radius }}, 0.0))
-s1.Line(point1=(0.0, {{ geometry.bullet_radius }}), point2=(0.0, -{{ geometry.bullet_radius }}))
-s1.VerticalConstraint(entity=g[4], addUndoState=False)
-s1.ParallelConstraint(entity1=g[2], entity2=g[4], addUndoState=False)
-s1.CoincidentConstraint(entity1=v[2], entity2=g[2], addUndoState=False)
-s1.CoincidentConstraint(entity1=v[3], entity2=g[2], addUndoState=False)
-s1.autoTrimCurve(curve1=g[3], point1=(-{{ geometry.bullet_radius }} * 0.5, {{ geometry.bullet_radius }} * 0.5))
-p = mdb.models['Model-1'].Part(name='bullet', dimensionality=THREE_D, 
-    type=DISCRETE_RIGID_SURFACE)
-p = mdb.models['Model-1'].parts['bullet']
-p.BaseShellRevolve(sketch=s1, angle=360.0, flipRevolveDirection=OFF)
-s1.unsetPrimaryObject()
-p = mdb.models['Model-1'].parts['bullet']
-del mdb.models['Model-1'].sketches['__profile__']
-p = mdb.models['Model-1'].parts['bullet']
-v1, e, d1, n = p.vertices, p.edges, p.datums, p.nodes
-p.ReferencePoint(point=p.InterestingPoint(edge=e[0], rule=CENTER))
-p = mdb.models['Model-1'].parts['Part-1']
-mdb.models['Model-1'].parts.changeKey(fromName='Part-1', toName='plate')
-mdb.models['Model-1'].Material(name='HPB 300 snap')
-mdb.models['Model-1'].materials['HPB 300 snap'].DuctileDamageInitiation(table=(
-    (1.0, 0.0, 30.0), (0.5, 0.4, 30.0)))
-mdb.models['Model-1'].materials['HPB 300 snap'].ductileDamageInitiation.DamageEvolution(
-    type=DISPLACEMENT, table=((0.02, ), ))
-mdb.models['Model-1'].materials['HPB 300 snap'].Density(table=(({{ material.density }}, ), ))
-mdb.models['Model-1'].materials['HPB 300 snap'].Elastic(table=(({{ material.elastic_modulus }}, 0.3), ))
-mdb.models['Model-1'].materials['HPB 300 snap'].Plastic(scaleStress=None, 
-    table=((300.0, 0.0), (321.46, 0.01), (329.41, 0.02), (334.58, 0.1), (
-    355.64, 0.15), (366.37, 0.4), (378.69, 1.0), (437.1, 4.0)))
-mdb.models['Model-1'].HomogeneousSolidSection(name='Section-1', 
-    material='HPB 300 snap', thickness=None)
-p = mdb.models['Model-1'].parts['plate']
-c = p.cells
-cells = c.getSequenceFromMask(mask=('[#1 ]', ), )
-region = regionToolset.Region(cells=cells)
-p = mdb.models['Model-1'].parts['plate']
-p.SectionAssignment(region=region, sectionName='Section-1', offset=0.0, 
-    offsetType=MIDDLE_SURFACE, offsetField='', 
-    thicknessAssignment=FROM_SECTION)
-p = mdb.models['Model-1'].parts['bullet']
-p = mdb.models['Model-1'].parts['bullet']
-r = p.referencePoints
-refPoints=(r[2], )
-p.Set(referencePoints=refPoints, name='Set-p')
-a = mdb.models['Model-1'].rootAssembly
-a = mdb.models['Model-1'].rootAssembly
-a.DatumCsysByDefault(CARTESIAN)
-p = mdb.models['Model-1'].parts['bullet']
-a.Instance(name='bullet-1', part=p, dependent=ON)
-p = mdb.models['Model-1'].parts['plate']
-a.Instance(name='plate-1', part=p, dependent=ON)
-p1 = a.instances['plate-1']
-p1.translate(vector=(40.0, 0.0, 0.0))
-a = mdb.models['Model-1'].rootAssembly
-a.rotate(instanceList=('plate-1', ), axisPoint=(40.0, 0.0, 0.0), 
-    axisDirection=(10.0, 0.0, 0.0), angle=90.0)
-a1 = mdb.models['Model-1'].rootAssembly
-e11 = a1.instances['plate-1'].edges
-a1.DatumPointByMidPoint(point1=a1.instances['plate-1'].InterestingPoint(
-    edge=e11[2], rule=MIDDLE), point2=a1.instances['plate-1'].InterestingPoint(
-    edge=e11[9], rule=MIDDLE))
-a = mdb.models['Model-1'].rootAssembly
-a.translate(instanceList=('bullet-1', ), vector=(0.0, 100.0, 0.0))
-a = mdb.models['Model-1'].rootAssembly
-a.translate(instanceList=('plate-1', ), vector=(-140.0, 0.0, -100.0))
-#: The instance plate-1 was translated by -140., 0., -100. (相对于装配坐标系)
-mdb.models['Model-1'].ExplicitDynamicsStep(name='Step-1', previous='Initial', timePeriod={{ physics.step_time }}, improvedDtMethod=ON)
-mdb.models['Model-1'].fieldOutputRequests['F-Output-1'].setValues(variables=(
-    'S', 'SVAVG', 'PE', 'PEVAVG', 'PEEQ', 'PEEQVAVG', 'LE', 'U', 'V', 'A', 
-    'RF', 'CSTRESS', 'EVF', 'STATUS'))
-p = mdb.models['Model-1'].parts['bullet']
-p = mdb.models['Model-1'].parts['bullet']
-p.seedPart(size=4.5, deviationFactor=0.1, minSizeFactor=0.1)
-p = mdb.models['Model-1'].parts['bullet']
-p.generateMesh()
-p = mdb.models['Model-1'].parts['plate']
-p = mdb.models['Model-1'].parts['plate']
-p.seedPart(size=6.0, deviationFactor=0.1, minSizeFactor=0.1)
-p = mdb.models['Model-1'].parts['plate']
-p.generateMesh()
-a = mdb.models['Model-1'].rootAssembly
-a = mdb.models['Model-1'].rootAssembly
-a.regenerate()
-a1 = mdb.models['Model-1'].rootAssembly
-n1 = a1.instances['plate-1'].nodes
-nodes1 = n1.getSequenceFromMask(mask=('[#ffffffff:144 #ffff ]', ), )
-a1.Set(nodes=nodes1, name='Set-node')
-mdb.models['Model-1'].ContactProperty('IntProp-1')
-mdb.models['Model-1'].interactionProperties['IntProp-1'].TangentialBehavior(
-    formulation=PENALTY, directionality=ISOTROPIC, slipRateDependency=OFF, 
-    pressureDependency=OFF, temperatureDependency=OFF, dependencies=0, table=((
-    0.1, ), ), shearStressLimit=None, maximumElasticSlip=FRACTION, 
-    fraction=0.005, elasticSlipStiffness=None)
-mdb.models['Model-1'].interactionProperties['IntProp-1'].NormalBehavior(
-    pressureOverclosure=HARD, allowSeparation=ON, 
-    constraintEnforcementMethod=DEFAULT)
-a1 = mdb.models['Model-1'].rootAssembly
-s1 = a1.instances['bullet-1'].faces
-side1Faces1 = s1.getSequenceFromMask(mask=('[#1 ]', ), )
-region1=regionToolset.Region(side1Faces=side1Faces1)
-a1 = mdb.models['Model-1'].rootAssembly
-region2=a1.sets['Set-node']
-mdb.models['Model-1'].SurfaceToSurfaceContactExp(name ='Int-1', 
-    createStepName='Step-1', main = region1, secondary = region2, 
-    mechanicalConstraint=KINEMATIC, sliding=FINITE, 
-    interactionProperty='IntProp-1', initialClearance=OMIT, datumAxis=None, 
-    clearanceRegion=None)
-a1 = mdb.models['Model-1'].rootAssembly
-v1 = a1.instances['bullet-1'].vertices
-verts1 = v1.getSequenceFromMask(mask=('[#3 ]', ), )
-r1 = a1.instances['bullet-1'].referencePoints
-refPoints1=(r1[2], )
-region=regionToolset.Region(vertices=verts1, referencePoints=refPoints1)
-mdb.models['Model-1'].rootAssembly.engineeringFeatures.PointMassInertia(
-    name='Inertia-1', region=region, mass=0.1, i22=0.1, alpha=0.0, 
-    composite=0.0)
-a1 = mdb.models['Model-1'].rootAssembly
-f1 = a1.instances['plate-1'].faces
-faces1 = f1.getSequenceFromMask(mask=('[#5 ]', ), )
-region = regionToolset.Region(faces=faces1)
-mdb.models['Model-1'].EncastreBC(name='BC-1', createStepName='Initial', 
-    region=region, localCsys=None)
-a1 = mdb.models['Model-1'].rootAssembly
-r1 = a1.instances['bullet-1'].referencePoints
-refPoints1=(r1[2], )
-region = regionToolset.Region(referencePoints=refPoints1)
-mdb.models['Model-1'].Velocity(name='Predefined Field-1', region=region, 
-    field='', distributionType=MAGNITUDE, velocity1=0.0, velocity2=-100000.0, 
-    velocity3=0.0, omega=0.0)
-p = mdb.models['Model-1'].parts['plate']
-elemType1 = mesh.ElemType(elemCode=C3D8R, elemLibrary=EXPLICIT, 
-    kinematicSplit=AVERAGE_STRAIN, secondOrderAccuracy=OFF, 
-    hourglassControl=DEFAULT, distortionControl=DEFAULT)
-elemType2 = mesh.ElemType(elemCode=C3D6, elemLibrary=EXPLICIT)
-elemType3 = mesh.ElemType(elemCode=C3D4, elemLibrary=EXPLICIT)
-p = mdb.models['Model-1'].parts['plate']
-c = p.cells
-cells = c.getSequenceFromMask(mask=('[#1 ]', ), )
-pickedRegions =(cells, )
-p.setElementType(regions=pickedRegions, elemTypes=(elemType1, elemType2, 
-    elemType3))
-p = mdb.models['Model-1'].parts['bullet']
-a = mdb.models['Model-1'].rootAssembly
-a.regenerate()
-a = mdb.models['Model-1'].rootAssembly
-mdb.Job(name='Job-1', model='Model-1', description='', type=ANALYSIS, 
-    atTime=None, waitMinutes=0, waitHours=0, queue=None, memory=90, 
-    memoryUnits=PERCENTAGE, explicitPrecision=SINGLE, 
-    nodalOutputPrecision=SINGLE, echoPrint=OFF, modelPrint=OFF, 
-    contactPrint=OFF, historyPrint=OFF, userSubroutine='', scratch='', 
-    resultsFormat=ODB, numDomains=1, activateLoadBalancing=False, 
-    numThreadsPerMpiProcess=1, multiprocessingMode=DEFAULT, numCpus=1)
-mdb.jobs['Job-1'].submit(consistencyChecking=OFF)
-o3 = session.openOdb(name='G:/Abaqus/agent_project/Job-1.odb')
-session.animationOptions.setValues(frameRate=4)
-mdb.save()
-```
-
-### main.py
-
-```python
-import uuid
-import os
-from graph.workflow import build_cae_graph
-from langchain_core.messages import HumanMessage
-
-def main():
-    # 1. 编译图状态机
-    app = build_cae_graph()
-    
-    # 2. 初始化线程配置 (LangGraph 追踪状态需要)
-    # thread_id 决定了对话的隔离性，同一个 ID 会共享历史
-    thread_id = str(uuid.uuid4())
-    thread_config = {"configurable": {"thread_id": thread_id}}
-    
-    print("="*55)
-    print("🤖 欢迎使用 CAE 多智能体仿真平台 (v2.0 架构重构版)")
-    print("="*55)
-    print(f"📌 会话 ID: {thread_id}")
-
-    # ================= 真实交互循环 =================
-    while True:
-        user_input = input("\n👤 请输入您的仿真需求 (或补充参数): ")
-        
-        if user_input.strip().lower() in ['q', 'quit', 'exit']:
-            print("👋 感谢使用，系统已退出。")
-            break
-            
-        if not user_input.strip():
-            continue
-
-        print("🚀 正在通过多智能体协作处理您的请求...\n")
-        
-        # 【核心重构：使用原生消息格式推送】
-        # 初始状态只需传入最新的 HumanMessage，LangGraph Checkpointer 会处理历史合并
-        initial_input = {
-            "messages": [HumanMessage(content=user_input)],
-            "error_log": None,
-            "retry_count": 0
-        }
-
-        # 推入状态机并流式输出
-        try:
-            for output in app.stream(initial_input, config=thread_config):
-                for node_name, node_state in output.items():
-                    print(f"🔄 节点 [{node_name}] 任务完成")
-                    
-                    # 检查是否有追问或中断
-                    if node_state.get("error_log") == "HITL_INTERRUPT":
-                        # 注意：在 Extractor 中已经打印了 AI 的追问内容
-                        print("🛑 [系统挂起] 等待用户补充参数...")
-                        
-        except Exception as e:
-            print(f"❌ 运行过程中发生未知错误: {e}")
-
-if __name__ == "__main__":
-    main()
-```
+#### 
 
 ![image-20260419175106347](./assets/image-20260419175106347.png)
 
