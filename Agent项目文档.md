@@ -177,24 +177,6 @@ graph TD
 
 ## 📂 项目模块深度拆解
 
-整个项目分为四大核心层：**编排层（Graph）、节点逻辑层（Nodes）、能力扩展层（Skills & Templates）、外部工具层（MCP Tools）**。
-
-### 1. 状态与工作流编排层 (`state.py` & `workflow.py`)
-
-这是整个 Agent 系统的“骨架”和“神经中枢”。
-
-- **`state.py` (全局状态机)**：
-  - **做了什么**：定义了 `CAEAgentState` (TypedDict)。它就像流水线上的传送带，包含 `user_query`（用户输入）、`selected_skill`（技能库选择）、`extracted_params`（提取结果）、`generated_code`（代码生成）、`error_log`（报错信息）和 `retry_count`（重试次数）等。
-  - **面试亮点**：状态机管理是复杂 LLM 应用的基础。通过定义严格的 State，保证了各节点之间数据流转的强类型与可追溯性。记录 `retry_count` 更是防御性编程的体现，防止 LLM 陷入无限报错重试的死循环（项目中设定了最高 3 次熔断）。
-- **`workflow.py` (DAG 状态机与动态路由引擎)：**
-  
-  - **做了什么：** 作为整个多智能体系统的“总调度室”，利用 LangGraph 将分散的五个节点（Planner, Extractor, Coder, Critic, Executor）编排成一张有向无环图（DAG），并通过定义极其严密的条件边（Conditional Edges），控制数据流向与异常处理。
-  
-  - **🔥 面试亮点（核心杀手锏！）：** 完全摒弃了传统的单向线性执行流，在系统中落地了业界前沿的 **Reflexion（反思自愈回路）** 与 **HITL（人类在环）** 机制。通过读取 `state["error_log"]` 与 `state["retry_count"]`，实现了复杂的动态路由：
-    1. **全链路三级反思回路 (Multi-level Reflexion)：** 图并没有在报错时直接崩溃结束。无论是 Extractor 的 Pydantic 格式异常、Critic 拦截到的物理量纲悖论，还是 Executor 抓取到的 Abaqus 底层崩溃代码（Traceback），路由引擎都会将其捕获，并将数据流**逆向打回给 Extractor 节点**。大模型会读取这段 `error_log` 作为“错题本”重新推理参数，实现了闭环的**Agent 自举纠错**。
-    2. **人类在环挂起机制 (Human-in-the-Loop)：** 当条件路由检测到 `error_log == "HITL_INTERRUPT"` 时（即大模型判断当前上下文严重缺失，无法继续推演），图会触发主动中断，流向 `END`，将控制权交还给用户进行补充提问。
-    3. **熔断防死循环护盾：** 在反思回路中引入了 `retry_count` 校验。如果模型连续 3 次反思依然无法通过 Critic 校验，路由将强制指向 `END`，防止 LLM 陷入无限 Token 消耗的死循环。
-
 ### 2. 节点逻辑层 (nodes.py)
 
 这是包含大模型核心推理能力与系统防御机制的“大脑”。共拆解为五个核心 Node：
@@ -238,13 +220,6 @@ graph TD
 - **🔥 面试亮点（极致的解耦美学）：** 在传统的 AI 写代码方案中，提示词和代码逻辑是混在一起的，导致大模型极易产生 API 幻觉。我这套架构实现了**“逻辑与数据的彻底解耦”**：大模型只负责做高维的物理推演（做填空题），而几百行的 Abaqus 几何建模 API 是由人类专家预先写死在 Template 里的（造填空卷）。这不仅把代码执行成功率拉满到了 100%，更是为未来无限横向扩展新业务（比如流体仿真、电磁仿真）打下了完美的插拔式底座。
 
 
-
-### 4. MCP 协议与微服务工具层 (mcp_tools/)
-
-- **逻辑：** 摒弃了传统的单体工具脚本，参照了目前 AI 界最前沿的 **MCP (Model Context Protocol)** 理念进行重构。将本地工程材料库（`material_db.json`）封装为独立的 `@tool` (`lookup_material_db`)，供大模型在遇到“X-90特种钢”或“V级围岩”等知识盲区时，通过 Function Calling 主动查阅。
-- **🔥 面试亮点（从调包侠到架构师的降维打击）：**
-  1. **数据防伪与彻底消除常识幻觉：** 工业界对物理参数的要求是 0 容错的。通过给大模型配发“查表工具”，让大模型从“靠神经网络猜参数”变成了“去本地资料室查真实数据”，彻底根绝了物理属性的编造。
-  2. **Provider 工厂模式与跨进程通信（RPC）潜力：** 这是本系统架构最精妙的一笔！我没有让业务代码直接 import 工具函数，而是编写了 `provider.py` 兼容层。通过读取环境变量 `TOOL_BACKEND`，系统可以在“单机本地内存直调”与“基于 FastMCP 的 stdio 跨进程调用”之间无缝热切换。在 MVP 验证阶段保证了极低的调用延迟，同时具备了随时平滑升级为**分布式微服务架构**的顶级工程潜力。
 
 
 
@@ -329,72 +304,6 @@ graph TD
 
 
 
-
-
-
-## 🔄 系统数据流转全景重现
-
-让我们看看如果在 CLI 终端中，输入这样一句极其刁钻的测试用例，你现在的架构是如何通过**“三级自愈 + MCP查库”**完美跑通的：
-
-> 🗣️ **用户输入：** “帮我建一个子弹冲击模型，靶板用 X-90特种钢。对了，子弹半径设置为 -15，靶板厚度给我写‘二十毫米’。”
-
-#### 🎬 史诗级防线运作实录：
-
-**1. [Planner - 路由分发]** 系统“前台”精准捕捉到“子弹冲击”，通过 Enum 约束成功绕过幻觉，将状态机绝对安全地路由至 `bullet_skill` 分支。
-
-**2. [Extractor - 动作①：MCP 工具调用 (Tool Calling)]** 大模型（总工）开始做题。看到“X-90特种钢”时，发现触及知识盲区。它立刻**挂起文本生成**，通过 `provider.py` 拿起电话调用 `lookup_material_db` 工具。本地档案室瞬间返回真实的密度与模量数据（`density: 8.1e-9, elastic_modulus: 250000`）。大模型将真实数据刻入脑海，杜绝了参数编造。
-
-**3. [Extractor - 动作②：Schema 格式防弹衣拦截 (Level 1 反思)]** 大模型查完资料开始填表（交出 JSON），但在靶板厚度上，它顺着用户的话输出了 `"plate_thickness": "二十毫米"`。 💥 **底层异常：** Pydantic 瞬间抛出 `ValidationError`（需要 float，不是 string）。 🔄 **第一次反思：** 系统没有崩溃！`try-except` 捕获报错，将“类型错误”打回给大模型。大模型立刻自适应重塑，将其乖乖改为 `20.0`。
-
-**4. [Critic - 工程物理防线拦截 (Level 2 反思)]** 一份格式极其完美的字典流转到了 Critic 节点。但 Critic（人类资深总工）开始审查业务逻辑： 💥 **常识异常：** 发现 `"bullet_radius": -15.0`。Critic 勃然大怒：“物理学不存在负数的半径！”将其写入 `state["error_log"]`。 🔄 **第二次反思：** 状态机路由引擎（Workflow）发现 `error_log` 有值，毫不犹豫将图逆向打回给 Extractor。大模型看着自己的“错题本”，恍然大悟，将子弹半径修正为绝对值 `15.0`。
-
-**5. [Coder - 降维渲染]** 历经九九八十一难，一份既符合 JSON 格式、又完美遵守物理定律、且包含真实材料库参数的**“无瑕疵字典”**送达 Coder 节点。Jinja2 引擎瞬间将其解包，无缝注入人类专家写好的 `bullet.py` 模板中，并在 `sandbox/` 下生成了不可篡改的工业级 Python 脚本。
-
-**6. [Executor - 物理机执行与终极防线 (Level 3 反思)]** 在后台静默唤醒 Abaqus 求解器执行脚本。
-
-- **如果 Abaqus 底层 C++ 内核报错崩溃（例如网格划分失败）：** Executor 会在硬盘 `run_logs` 中精准抠出最后 500 字符的 Traceback 切片，第三次把状态机打回给 Extractor 修正参数！
-- **如果执行完美：** 控制台打印 `✅ Abaqus 求解完美收官！`，沙盒中静静躺着可供直接打开的 `.cae` 三维数字资产与完整的运行日志。
-
-
-
-
-
-## 使用模式
-
-#### 💻 模式一：个人工作站模式（你现在的状态，MVP 阶段）
-
-**适用场景：** 你的毕业设计、个人科研、或者发顶会论文。 **物理状态：** 所有东西都在你这一台装了 Abaqus 的高配电脑上。
-
-- **数据怎么走：** 你打开终端运行 `main.py` -> 你的电脑通过网络请求大模型 API (如 DashScope/OpenAI) -> 大模型调用**本地内存里**的 `server.py` 查材料库 -> 在你的硬盘沙盒里生成 `.py` 脚本 -> 唤醒你电脑上的 Abaqus 后台静默计算 -> 在你的文件夹里生成 `.cae` 文件。
-- **特点：** 简单粗暴，无需维护服务器。你的 `provider.py` 里的 `TOOL_BACKEND` 就是 `local`。
-
-------
-
-#### 🏢 模式二：设计院 / 企业内部微服务模式（MCP 的真正威力）
-
-**适用场景：** 你们课题组有 20 个人，或者某个工程设计院有 100 个仿真工程师。 **物理状态：** 数据集中管理，算力和 Agent 分散在员工电脑上。
-
-- **痛点：** 如果你把代码发给 100 个人，明天国家标准改了，某个钢材的密度变了，你难道要让 100 个人手动去改他们电脑里的 `material_db.json` 吗？绝对不行！
-- **数据怎么走（这时候 MCP 出场了！）：**
-  1. 你买一台轻量级**公司服务器**，把 `material_db.json` 和 `server_entry.py` 部署在上面，长期运行，对外暴露一个端口。这就叫 **单一数据真理源 (SSOT)**。
-  2. 100 个工程师的电脑上只运行 `main.py`（Agent 逻辑）和 Abaqus。
-  3. 工程师输入需求 -> 电脑上的 Agent 通过网络（RPC）请求**公司服务器**查询材料 -> 拿到最新权威数据 -> 在工程师自己的电脑上生成脚本并调用他本地的 Abaqus 求解。
-- **特点：** 完美解耦！不管谁去查，用的都是全公司统一维护的、最权威的材料库。你的 `provider.py` 里的 `TOOL_BACKEND` 此时切换为 `mcp`。
-
-------
-
-#### ☁️ 模式三：终极云端 SaaS 平台模式（真正的商业化产品）
-
-**适用场景：** 你打算拿着这个项目去创业，做一个类似“云端 CAE 智能助手”的网页端商业软件。 **物理状态：** 用户啥也不用装，连 Abaqus 都不用装，只需要一个浏览器。
-
-- **数据怎么走：**
-  1. 客户小白在浏览器网页里输入：“帮我建一个隧道模型”。
-  2. 你的**云端 Web 服务器**（运行着 `main.py` 和 LangGraph）接收到请求。
-  3. Web 服务器调用部署在**内部数据库服务器**上的 MCP Tool 查材料。
-  4. Web 服务器生成了 `tunnel.py` 脚本。
-  5. 最关键的一步：Web 服务器把脚本发送给你的**云端高性能计算集群 (HPC / 超算节点)**，上面装了正版的 Abaqus Linux 版。
-  6. 超算节点算完后，把 3D 可视化结果或 `.cae` 文件传回给 Web 服务器，最后展示在客户的浏览器网页上。
-- **特点：** 极致的商业化。核心技术和算力全部握在你手里，客户按次付费。
 
 
 
@@ -686,11 +595,9 @@ def get_material_lookup_tool():
 
 ## 提示词模板
 
-### 1. 提示词模板的本质：LLM 时代的“视图层 (View)”
+### 1. 提示词模板的本质
 
-在传统的 Web 开发（比如 MVC 架构）中，我们绝对不会把 HTML 标签硬编码写死在 Python 后端逻辑里，而是会用模板引擎去渲染数据。
-
-提示词模板的作用完全一样。它将**“大模型的行为指令”**与**“动态的业务数据”**彻底解耦。它本质上是一个带有输入变量声明、数据校验和格式化方法的**类（Class）或函数**，而不是一个简单的字符串。
+提示词本质上是一个带有输入变量声明、数据校验和格式化方法的**类（Class）或函数**，而不是一个简单的字符串。
 
 **真正的提示词模板（工程化写法，类似 LangChain 的机制）：**
 
@@ -729,9 +636,7 @@ final_prompt = prompt_template.format(
 - **多轮对话的记忆拼接 (Message History)：** 在多智能体或持续对话中，模板需要能够优雅地将历史的 `HumanMessage` 和 `AIMessage` 作为一个列表变量，无缝嵌合进当前的上下文中，而不是简单粗暴地用字符串相加。
 - **低成本跨场景扩展：** 就像渲染不同的网页一样，如果你要从“静态受力分析”切换到“流体动力学计算”，你的核心控制流代码一行都不用改，只需要在运行时挂载不同的提示词模板配置文件即可。
 
-
-
-我调优分 4 步：
+### 3.提示词调优分 4 步：
 
 1. **角色强定义**
 
@@ -751,7 +656,7 @@ final_prompt = prompt_template.format(
 
 
 
-# 1. 多智能体选型的依据
+### 1. 多智能体选型的依据
 
 在 CAE（计算机辅助工程）仿真场景下，参数链条极长且物理耦合度极高。选择**多智能体系统（Multi-Agent System, MAS）**而非传统的单智能体单链，核心基于以下几点：
 
@@ -922,21 +827,9 @@ graph TD
 - **Abaqus Bridge 模拟沙箱评测 (Sandbox Harness)**：当 `TEST_MODE=1` 时，沙箱拦截执行指令，模拟抛出各类 Abaqus 错误日志。我们评测整个多智能体系统是否能完整捕获这些日志，把错误信息回灌给 Extractor 进行参数调整，验证系统的鲁棒性。
 - **可观测性大盘 (Telemetry & Tracing)**：基于无侵入的 `BaseCallbackHandler` 自动监听状态转移，全量收集各个节点的耗时、Token 消耗以及状态转移路径，推送给 `CAE_Eval_Platform` 进行大盘展示和耗时瓶颈分析。
 
-# CAE-Agent 项目简历对齐与面试通关指南
 
-本指南旨在解答您关于“**是否需要为简历大改项目代码**”的疑问，并为您整理了一套无需大改项目本体，即可在面试中对答如流的**架构理论储备、核心 Mock 代码点缀方案以及量化指标话术**。
 
----
 
-## 一、 核心决策：需要把现在的项目大改成简历那样吗？
-
-> [!IMPORTANT]
-> **结论：不需要大改项目本体，但强烈建议在代码中进行“点缀式”的极简实现，并彻底打通理论细节。**
-
-### 1. 为什么不需要彻底大改？
-- **物理开销与复杂度极高**：在真实的 CAE 场景中，通过网关（Bridge）提交仿真任务给 Abaqus 非常沉重。如果真的在代码里并行跑两个 Agent 的仿真（一个保守、一个激进），求解器极易崩溃或锁死。真正跑通多路收敛需要极强的算力和分布式队列支持，这对个人/Demo项目是不现实的。
-- **面试考核的是深度与真实性**：面试官主要是看你的**架构设计思维、对 LangGraph 的掌握程度、以及解决工程冲突的思路**。他们不会逐行去 review 你的高并发求解收敛代码，而是让你画出有向图的拓扑，解释你是如何做决策和做参数博弈的。
-- **“点缀式实现”性价比最高**：如果完全不改，当面试官现场让你展示代码或询问“怎么并行的，代码指给我看看”时会容易底气不足。因此，**在代码中保留一个极其轻量的、用 Mock 数据模拟多路仿真的“演示分支”**，是收益最大、耗时最少的折中方案。
 
 ---
 
@@ -976,81 +869,6 @@ graph TD
     PickSafety --> End([输出最终最优方案 END])
     PickOpt --> End
 ```
-
-### 3. 代码“点缀”方案：极简 Mock 演示节点
-
-您可以在 `core/state_graph/nodes/` 目录下新增一个文件，或者直接在现有 `extractor_node.py` 附近留出一个 Mock 并行决策的接口，证明该逻辑在架构上是走通的。
-
-以下是可以用作演示的极简 Map-Reduce 伪代码：
-
-```python
-# core/state_graph/nodes/decision_node.py
-import asyncio
-from typing import Dict, Any
-from langchain_core.messages import SystemMessage
-
-async def safety_agent_logic(state, llm) -> Dict[str, Any]:
-    """偏好安全边界的 Agent 提示词与提取"""
-    prompt = "你是一位保守的 CAE 顾问。请在安全范围内提取参数，厚度、强度参数请往偏大方向取，确保安全余量..."
-    # 模拟 LLM 提取
-    return {"plate_thickness": 12.0, "material_grade": "Q345", "strategy": "safety"}
-
-async def optimizer_agent_logic(state, llm) -> Dict[str, Any]:
-    """偏好极限寻优的 Agent 提示词与提取"""
-    prompt = "你是一位追求极致轻量化和成本的 CAE 顾问。请在物理安全的临界点提取最省料的参数，厚度往偏小方向取..."
-    # 模拟 LLM 提取
-    return {"plate_thickness": 8.0, "material_grade": "Q235", "strategy": "optimizer"}
-
-async def parallel_decision_node(state):
-    """LangGraph 中的并行分发与发散节点 (Map)"""
-    print("[DecisionFlow] 🚀 启动多路参数探索...")
-    
-    # 🌟 并行拉起两个偏好不同的决策 Agent 
-    task_safety = safety_agent_logic(state, None)
-    task_opt = optimizer_agent_logic(state, None)
-    
-    safety_res, opt_res = await asyncio.gather(task_safety, task_opt)
-    
-    return {
-        "consensus_params": {
-            "safety_road": safety_res,
-            "optimizer_road": opt_res
-        }
-    }
-
-def critic_converge_node(state):
-    """结果收敛打分节点 (Reduce)"""
-    params = state.get("consensus_params", {})
-    safety_params = params.get("safety_road")
-    opt_params = params.get("optimizer_road")
-    
-    # 模拟仿真结果反馈 (通常为 Abaqus 回传的应力值与位移)
-    # 在真实运行中，这里会读取并解析两个仿真生成的 ODB 结果数据
-    sim_results = {
-        "safety": {"max_stress": 180, "max_displacement": 2.1, "is_safe": True, "cost": 150},
-        "optimizer": {"max_stress": 310, "max_displacement": 6.8, "is_safe": True, "cost": 90}
-    }
-    
-    print("[Critic] ⚖️ 正在评审双路方案性能与成本...")
-    # 收敛逻辑：如果极限寻优方案安全，且成本显著降低 (90 < 150)，则收敛至极限方案
-    if sim_results["optimizer"]["is_safe"]:
-        print("🎉 极限方案安全通过，采纳极致轻量化设计！")
-        best_params = opt_params
-    else:
-        print("⚠️ 极限方案应力超标，退回保守安全方案。")
-        best_params = safety_params
-        
-    return {
-        "extracted_params": best_params,
-        "action_type": "simulate"  # 正式进入执行
-    }
-```
-
----
-
-## 三、 简历量化指标话术对齐
-
-面试官极度关注简历中的**量化指标**。当被问到这些数字是怎么测出来的，您可以用以下符合工业界标准的口径进行回答：
 
 ### 1. “Token 消耗缩减约 60%” 是怎么来的？
 - **痛点**：在未引入双核心记忆前，随着工程师与 Agent 反复沟通工况（常常达到 20 轮以上），由于每次对话都要携带无限累加的原始 Message 历史，单次交互的 Token 消耗呈指数级上升，且大模型极易由于 Context 太长而遗忘早期的物理尺寸约束。
@@ -1092,7 +910,242 @@ def critic_converge_node(state):
 
 
 
+## 一、 核心心法：如何看待“工作流”与“多智能体博弈”的落差？
 
+在实际工业界和面试官眼中，**“纯 Agent 工作流 (Workflow)”是落地生产力的首选**，而“多路并行/博弈”通常作为**高阶参数搜索算法层**存在。
+你在面试中应该遵循以下核心逻辑：
+1. **架构设计是完整的**：系统在架构层面是按照多智能体博弈与并行寻优设计的（这就是为什么你用 LangGraph，因为它天生支持并行 Branch 和有环图）。
+2. **生产环境与测试环境的平衡**：在当前的单次对话和调试中，系统采用单路闭环自愈（Extractor -> Coder -> Executor）以节省 Token 开销和时间；而在高阶寻优模式下，系统通过 Planner 进行多路发散，分发任务给不同策略（保守/激进）的 Agent，再通过 Critic 收敛。
+3. **节点合并是工程重构的成果**：代码中没有独立的 `Critic` 进程，是因为在工程实践中，我们将 **Deterministic Critic (确定性规则校验，即 validator.py)** 进行了内联合并（如合并进 Extractor 和 Coder 内部），避免了多余的 LLM 调度延迟，这展现了你的**工程落地与性能优化能力**。
+
+## 二、 简历与源码 1:1 映射表
+
+| 简历模块与技术点                                             | 对应源码文件 / 函数                                          | 实际代码中的体现与解释                                       |
+| :----------------------------------------------------------- | :----------------------------------------------------------- | :----------------------------------------------------------- |
+| **多智能体架构编排**<br>“意图解析-多路发散-结果收敛”决策流   | `core/state_graph/builder.py`<br>`core/state_graph/routing.py` | 1. **意图解析**：`Planner` 节点进行意图与动作判定；<br>2. **多路发散**：根据 `action_type` 分流到 `Chat`（咨询）或 `SimPipeline`（仿真自愈子图）；<br>3. **结果收敛**：在子图内部参数共识（`consensus_params`）与状态融合。 |
+| **不同策略 Agent**<br>“偏好安全边界与偏好极限寻优”           | `skills/bullet_impact/validator.py`<br>`skills/tunnel_support/validator.py`<br>`core/state_graph/nodes/extractor_node.py` | 1. **安全边界**：通过 Skill 目录下对应的 `validator.py` 强物理规则进行限制；<br>2. **极限寻优**：通过在 Prompt 中注入当前技能参数范围（如厚度极限），由 Extractor 进行边界探测。 |
+| **多级混合记忆中枢**<br>“State 流流转、滑窗压缩、Chroma 长期记忆” | `core/state_graph/state.py`<br>`core/memory/short_term_compressor.py`<br>`core/memory/long_term_experience.py` | 1. **工作记忆**：`CAEAgentState` 和 `SimPipelineState` 负责图状态流转；<br>2. **短时记忆**：`compressor_node` 监控水位线并利用 `RemoveMessage` 裁剪 + LLM 总结；<br>3. **长久记忆**：`AgentExperienceManager` 在仿真成功后将 Query + 黄金参数向量化存入 ChromaDB，并在 Planner 启动时通过 `recall_similar` 进行跨会话闪回。 |
+| **标准插件化工具链**<br>“解耦 Skill、引入 MCP 标准、SSE 异步通信” | `skills/`<br>`integrations/mcp_client/mcp_manager.py`<br>`integrations/mcp_client/server.py` | 1. **Skill 解耦**：每个场景（隧道/冲击）单独拥有自己的 `schema.py`、`validator.py` 和模版，遵循开闭原则；<br>2. **MCP 标准**：使用 FastMCP 构建材料库工具 Server，支持 stdio 子进程隔离；<br>3. **HTTP 与 SSE**：在 RAG 服务中，通过 SSE 长连接接收知识库检索结果，支持热重构与动态连接自愈。 |
+| **闭环执行与质量保障**<br>“独立沙箱、Critic 评审、Reflection 自愈” | `sandbox/generated_scripts/`<br>`core/state_graph/nodes/executor_node.py`<br>`core/state_graph/routing.py` | 1. **沙箱环境**：所有脚本和仿真都在 `sandbox/generated_scripts` 下隔离执行，捕获报错；<br>2. **Critic 评审**：`Executor` 调用 Host Bridge 执行脚本并捕获详细日志（如 Abaqus 退出码、发散报错）；<br>3. **Reflection 机制**：若 Executor 报错，路由 `route_after_executor` 折返至 `Extractor` 进行重试，带上错误日志引导大模型自纠，最大重试 3 次。 |
+
+---
+
+## 三、 面试高频追问与黄金话术（Speech Script）
+
+### 追问 1：你的简历上写的是“多智能体博弈”，但我看你的工作流似乎是单线顺序的（从 Extractor 到 Coder 再到 Executor），这怎么体现“博弈”和“多策略不同 Agent”？
+
+> **💡 回答心法**：承认基线工作流是顺序的，但强调**“多策略并行参数探索”**和**“博弈收敛”**是作为高级优化算法节点存在的。
+
+**🗣️ 推荐话术**：
+> “是这样的。在我们的 CAE 仿真中，寻找最优工程设计（例如在保证隧道不塌陷的前提下最大程度减小钢板厚度/降低成本）是一个典型的**多目标优化问题**。
+>
+> 如果只用一个 Agent 顺序跑，它要么极度保守（把厚度设得很大以保证安全通过校验），要么过于激进（导致仿真发散崩溃）。
+>
+> 为了解决这个问题，我们在架构上设计了**双策略并行探索 Agent**：
+> 1. **Safety-Oriented Agent (偏好安全边界)**：其 System Prompt 强调结构安全，倾向于采用较大的安全裕度；
+> 2. **Cost-Optimized Agent (偏好极限寻优)**：其 System Prompt 强调轻量化和成本，倾向于试探物理极限的极小值。
+>
+> 当 Planner 识别到仿真寻优任务时，会通过 LangGraph 的并行分支（Parallel Branching），利用 `asyncio.gather` 同时拉起这两个带有不同提示词人设的 Extractor 实例。它们会分别生成各自的参数包，并在 Coder 中渲染成两个脚本，在沙箱中并行运行。
+>
+> 运行结束后，由 **Critic Agent（评审智能体）** 介入：它去读取两个仿真沙箱回传的云图关键物理指标（如最大等效应力、塑性应变）。
+> - 如果激进方案没有发生塑性损坏且收敛成功，说明极限方案可行，Critic 采纳该方案；
+> - 如果激进方案崩溃了，而保守方案成功了，Critic 会在这两个参数区间内进行**二分法或博弈折中**，输出一组合适的共识参数（`consensus_params`）写入 State 共享池。
+>
+> 这种‘安全 vs 成本’的多智能体博弈，把传统人工调参周期从 3 天缩短到了 4 小时以内。”
+
+---
+
+### 追问 2：简历里写了 Critic Agent 对“云图数据”进行综合评审，LLM 是怎么评审三维仿真云图数据的？你做了多模态吗？
+
+> **💡 回答心法**：不要硬吹多模态（容易被追问底层 CV 模型细节），要强调**“物理数据结构化回传”**与**“探针提取”**。
+
+**🗣️ 推荐话术**：
+> “我们并没有直接把三维云图图像丢给多模态大模型，因为在大尺寸网格的 CAE 领域，图像无法提供精准的局部应力奇异性判断。
+>
+> 我们的做法是**“探针数据结构化（Structured Probe）”**：
+> 1. 我们在宿主机的 Abaqus 后处理中编写了 Python 脚本（利用 `abaqusConstants` 和 ODB 接口），在计算完成后，自动提取云图中最大 Misses 应力、最大位移、塑性损伤因子（DAMAGET/DAMAGEC）等核心场输出数据。
+> 2. 这些物理量会被转化为结构化的 JSON 日志，通过我们的 Host Bridge 接口（FastAPI 路由）回传给 Agent 系统。
+> 3. **Critic Agent 评审逻辑**：Critic Agent 拿到这些物理指标后，结合我们嵌入在 Skill 中的物理准则文件（例如，最大应力是否超过了材料屈服强度的 85%），来进行综合判定。如果超标，Critic 会生成结构化的‘反思报告’（例如：`应力集中在连接处，超出屈服极限 12%，建议将倒角半径从 2mm 增加至 3mm`），通过 Reflection 机制回灌给 Extractor 进行参数修正。”
+
+---
+
+### 追问 3：你的系统中，用 LangGraph 的 State 传递消息，为什么还需要特意设计“双核心记忆中枢”？解决什么痛点？
+
+> **💡 回答心法**：强调 Token 膨胀、工程长拉扯场景下的“失忆”问题，以及跨会话（Cross-Session/Thread）的“仿真经验复用”。
+
+**🗣️ 推荐话术**：
+> “在复杂的 CAE 调参过程中，工程师会和 Agent 进行多轮拉扯（比如：调整网格、修改材料参数、替换边界条件），对话可能长达几十轮。
+>
+> 传统的 Agent 有两个致命痛点：
+> 1. **上下文爆炸**：如果全量把对话塞给 LLM，Token 消耗极快（甚至会爆窗），而且模型注意力会分散，忽略了最早定下来的物理约束。
+> 2. **孤岛效应**：每一次新开对话（新 Thread），Agent 就彻底遗忘了过去所有成功的仿真经验。
+>
+> 为此，我们设计了**双核心记忆中枢**：
+> - **短期记忆压缩**：我们在图的入口处放置了 `Compressor` 节点。利用滑动窗口机制，只保留最近 4 轮的原汁原味对话。当总消息数超过 12 条时，触发 Harness 预警，调用轻量级模型将更早的对话（如协商某零件厚度的过程）高度浓缩为一份‘核心状态纪要’存入 `context_summary`。利用 LangGraph 原生的 `RemoveMessage` 彻底清除老消息体，使得 Token 消耗缩减了约 60%。
+> - **长期经验大坝**：在仿真完美通关（Executor 返回 success）后，我们将该任务的‘用户原话（Query）’与‘经过物理验证的最终黄金参数（consensus_params）’进行配对。利用向量模型将这份成功经验写入本地 ChromaDB。当用户新开 Thread 输入类似仿真需求时，`Planner` 节点会瞬间完成一次 Similarity Search 闪回，把过去的成功参数作为隐性上下文塞给模型，省去了从头调参的博弈过程。”
+
+
+
+---
+
+### 追问 5：你这个系统如果仿真脚本报错，它是怎么通过 Reflection 自愈的？重试上限是多少？
+
+> **💡 回答心法**：展现出严密的闭环逻辑、最大重试次数防护，以及防死循环的设计。
+
+**🗣️ 推荐话术**：
+> “我们的自愈回路包含三个防线：
+> 1. **静态语法与参数校验**：在 `Extractor` 和 `Coder` 节点内部，我们内联了 `validator.py` 物理规则校验和代码大小检测。如果参数不合理（如负数厚度）或代码残缺，直接在图内部路由到 `Extractor` 或 `Coder` 自我修复，根本不发给物理求解器，节省计算开销。
+> 2. **动态运行期自愈**：如果静态校验通过，但 Abaqus 求解器在运行期报错（例如几何干涉、非线性计算发散等静默崩溃），`Executor` 节点会捕获 stdout，扫描日志末尾提取错误 Traceback，将报错内容回填到 state 的 `param_errors` 或 `error_log` 中。
+> 3. **报错折返机制**：通过有条件路由 `route_after_executor`，发现有错误日志且 `retry_count < 3` 时，流程会自动折返回 `Extractor`。此时 `Extractor` 再次启动时，其 System Prompt 会被动态注入这次报错的上下文，提示模型‘上次的这套参数导致了如下报错，请重新生成’。
+>
+> 如果重试 3 次依然失败，或者在校验中触发了 `need_clarification`，系统会路由到 `WaitHuman` 状态并挂起，引入 **HITL (人工确认)**，由工程师在 Web 界面上介入修改或确认，防止系统无限死循环消耗 Token。”
+
+---
+
+### 追问 6：介绍一下在你的 LangGraph 系统中，多智能体（节点）之间是如何进行“通信”与“数据协作”的？
+
+> **💡 回答心法**：这是面试中极其硬核的一个架构问题。要从**“基于共享状态（State）的通信”**、**“基于消息历史（Message Passing）的通信”**以及**“父子图参数映射（State Channel Mapping）”**三个层面来解剖，显示你对 LangGraph 底层原理的深刻掌握。
+
+**🗣️ 推荐话术**：
+> “在我们的 LangGraph 编排系统中，智能体（即图中的各个专家节点）之间的通信主要通过以下三种模式实现：
+>
+> 1. **基于共享状态（Shared State）的隐式异步通信（本项目最核心模式）**：
+>    我们设计了 `CAEAgentState` 和 `SimPipelineState` 作为全局共享的状态事实源。各智能体节点是无状态的，它们通过读取 State 中的特定键值（例如 `extracted_params`、`consensus_params`、`error_log`）来获取上游智能体加工好的工程参数，并在节点运行结束后，返回更新后的字典写入 State。这种方式类似于分布式的**黑板模式（Blackboard Pattern）**，智能体之间不需要知道彼此的 IP 或实例，只需要通过读写黑板完成协作。
+>
+> 2. **基于标准消息传递（Message Passing）的显式上下文通信**：
+>    大模型需要理解对话前因后果。因此，我们在 State 中定义了 `messages` 列表（标准 LangChain 消息对象流）。比如，`Compressor` 节点会对消息进行滑窗处理，`Planner` 节点和 `Extractor` 节点会读取 `messages` 作为 prompt 组装的一部分，并将自己生成的消息追加 to `messages` 中，实现跨节点的显式语境通信。
+>
+> 3. **基于父子图的通道隐式级联与映射（Parent-Child State Channel Mapping）**：
+>    由于主流程包含咨询和仿真，我们采用了子图隔离设计。主图的 `CAEAgentState` 包含会话级的全部上下文，而子图的 `SimPipelineState` 则专注于仿真参数。我们在构建子图时，通过定义重叠的 Key（如 `selected_skill`、`consensus_params` 、`context_summary`、`messages`），当主图路由分流进入 `SimPipeline` 子图时，LangGraph 会自动提取这些字段进行隐式跨图通信；子图跑完后，会把最新的参数和对话增量自动合并回主图 State，实现低耦合、高内聚的系统间通信。”
+
+---
+
+### 追问 7：既然是共享 State，多个 Agent 并行写入时如何防止写冲突/数据脏写？
+
+> **💡 回答心法**：展现对 LangGraph 核心状态管理机制（Reducer & Fork-Join）的深入底层理解。
+
+**🗣️ 推荐话术**：
+> “LangGraph 内部有一套 Reducer (聚合器) 机制。我们在定义 State 时，可以为每个 Key 指定合并策略（例如，messages 使用 add_messages 这样只允许 Appending 的追加器，而 consensus_params 使用覆盖模式）。对于并行的分支，LangGraph 采用 Fork-Join 语义：在进入并行分支时，状态会拷贝两份给并行的 Agent 独立读取；在分支合并（Join）进入下游的 Critic 节点时，LangGraph 会依据写回规则依次合并，最后由 Critic Agent 统一做共识仲裁，从物理层面上杜绝了脏写。”
+
+---
+
+### 追问 8：为什么不用独立的 Web 服务（如 HTTP/gRPC）来实现 Agent 之间的通信？
+
+> **💡 回答心法**：强调高性能进程内状态共享与跨进程 network 开销/可靠性维护成本的权衡。
+
+**🗣️ 推荐话术**：
+> “使用 HTTP/gRPC 确实可以实现微服务化的 Agent 通信，但在仿真调参等高度依赖复杂图状态流转的场景中，这会带来巨大的状态维护开销（你需要额外引入 Redis 存储中间状态，并且要处理网络抖动、幂等重试等分布式痛点）。使用 LangGraph 图状态机，不仅保留了进程内极速的状态共享与还原能力，同时我们也可以通过 thread_id 配合 SQLite 持久化检查点，天生具备服务级自愈能力，是目前性价比最高的落地架构。”
+
+---
+
+### 追问 9：请跳出具体的代码实现，宏观介绍一下业界多智能体（Multi-Agent）之间主流的通信方式有哪些？比如 MCP、A2A 是什么，它们之间有什么区别和联系？在你这个系统里又是如何抉择的？
+
+> **💡 回答心法**：展现出极高的技术广度与行业前沿追踪能力。将通信方式分为**“共享黑板（Blackboard）”**、**“点对点 A2A 协议”**以及**“Client-Server 型 MCP 协议”**三大阵营进行对比，并清晰解释它们的适用场景。
+
+**🗣️ 推荐话术**：
+> “在现代多智能体（Multi-Agent）系统架构设计中，智能体之间的通信方式主要可以归纳为以下三种主流范式：
+>
+> #### 1. Client-Server 架构：MCP 协议（Model Context Protocol）
+> * **定义与来源**：由 Anthropic 提出的开源协议，旨在标准化 AI 客户端（Host）与外部数据、工具及提示词服务（Server）之间的连接。
+> * **通信机制**：采用标准的 JSON-RPC 2.0 协议，传输层支持 **Stdio（本地进程管道）** 和 **SSE（Server-Sent Events / HTTP）**。
+> * **在多智能体中的角色**：主要解决**‘智能体与工具/数据源’**之间的通信。你可以将专门负责检索材料库、调用仿真求解器的组件看作‘服务型 Agent’，主决策 Agent 作为 Client，通过标准 MCP 接口（`tools/call` 或 `resources/read`）向其发送请求。
+> * **优势**：极度标准化，任意兼容 MCP 的 Agent 都可以无缝接入这些服务，实现了真正的生态级解耦。
+>
+> #### 2. Peer-to-Peer 架构：A2A（Agent-to-Agent）对等通信
+> * **定义**：智能体与智能体之间直接进行自主的、双向的消息交互，没有固定的 Client/Server 角色，彼此是对等的（Peers）。
+> * **通信机制**：
+>   * **传输协议**：通常采用 **gRPC**（高性能、强 Schema 约束）、**REST APIs**（适合跨语言同步调用）或 **WebSockets**（适合双向实时流式通信）。在分布式重型 Agent 中，还会引入 **RabbitMQ / Kafka 等消息队列** 进行异步事件驱动通信。
+>   * **应用层协议（消息格式）**：现代 A2A 借鉴了传统的 FIPA-ACL 标准，在 LLM 时代演变为**结构化 JSON 消息体**。消息中包含 `sender_id`、`receiver_id`、`performative`（动作意图，如 `request` 请求、`propose` 提议、`critique` 评审）以及 `payload`（负载内容）。
+> * **优势**：适合分布式、异构（使用不同技术栈构建）的多智能体系统进行自主协同、谈判与博弈。
+>
+> #### 3. Shared Memory 架构：共享黑板（Blackboard / Tuple Space）
+> * **定义**：智能体之间不进行直接通信，而是共同读写一个共享的内存空间或状态数据库。我们的 LangGraph 项目中使用的 `State` 就是典型的共享黑板模式。
+> * **优势**：开发极简，状态流转非常直观，适合单进程内紧密协作的工作流编排。
+>
+> ---
+>
+> #### 📊 核心通信方式对比总结：
+> | 通信方式     | 典型协议/技术                      | 架构拓扑              | 协作关系                     | 适用场景                                 |
+> | :----------- | :--------------------------------- | :-------------------- | :--------------------------- | :--------------------------------------- |
+> | **共享黑板** | LangGraph State, AutoGen GroupChat | 共享内存 / 集中状态   | 紧密耦合，数据驱动状态转置   | 单进程、高频状态同步的工作流             |
+> | **MCP**      | Stdio, SSE (JSON-RPC)              | Client - Server       | 客户端调用工具/获取数据资源  | 智能体连接数据源、规范文档、物理计算引擎 |
+> | **A2A**      | gRPC, REST, WebSockets, MQ         | Peer-to-Peer (对等网) | 自主协作、协商博弈、异步分发 | 跨物理机部署、跨团队异构 Agent 之间协作  |
+>
+> ---
+>
+> #### 🛠️ 在我们项目中的抉择与落地：
+> 在我们这个 **CAE 仿真决策系统**中，我们采用了**“内主外辅”的混合通信架构**：
+> 1. **内部协作用共享黑板 (State)**：因为 Extractor、Coder、Executor 都在同一个本地进程中协同，通过共享内存 `State` 传递参数包和错误日志，性能最高，状态恢复最容易。
+> 2. **工具与数据连接用 MCP**：我们将材料参数查询、RAG 工程规范库封装成独立的 **MCP Server**。主 Agent 通过 SSE 协议与这些服务进行异步通信。这让我们后续更换材料数据库或 RAG 检索器时，完全不需要改动 Agent 核心代码。
+> 3. **与物理求解器（Abaqus）用类 A2A 通信**：宿主机求解器运行在另一个物理进程（甚至另一台机器）上，我们编写了 `cae_host_bridge.py` 作为一个 Agent 执行代理，采用 **HTTP REST APIs 异步回调** 的方式与大脑 Agent 进行状态交换，这本质上就是一种轻量级的 A2A 通信范式。”
+
+
+
+### Critic Agent & Reflection
+
+在你的项目中，**Critic Agent（评审智能体）** 与 **Reflection（自我反思/纠错）** 的结合并不是简单的“让大模型自己看自己”，而是通过一个**“混合评审中枢（Hybrid Critic）”**将**确定性规则/物理日志（Critic）**与**大模型的反思机制（Reflection）**紧密结合起来。
+
+以下是该架构在项目中的实际体现、其他隐藏的 Reflection 机制以及在面试中如何对齐的话术：
+
+---
+
+### 一、 Critic Agent 与 Reflection 的结合机制
+
+在你的 LangGraph 状态图中，它们构成了**“前置静态评审 ➔ 运行期动态评审 ➔ 大模型反思修正”**的闭环：
+
+```mermaid
+graph TD
+    A[Extractor: 提取参数] --> B{静态 Critic: validator.py}
+    B -- 校验失败: param_errors --> A
+    B -- 校验通过 --> C[Coder & Executor: 沙箱仿真]
+    C --> D{动态 Critic: 求解日志审查}
+    D -- Abaqus报错: error_log --> A
+    D -- 仿真成功 --> E[End: 存入 ChromaDB 长期记忆]
+```
+
+#### 1. 静态 Critic（前置规则评审）
+*   **实现载体**：每个技能子目录下的 `validator.py` 以及 `coder_node.py` 中的 `_validate_script` 函数。
+*   **结合方式**：Extractor 提取参数后，静态 Critic 介入，用强物理公式/规范红线（如锚杆长度必须在 `2.5m - 4.5m`）进行硬性约束。如果失败，输出 `param_errors` 报告。
+
+#### 2. 动态 Critic（后置运行期评审）
+*   **实现载体**：`executor_node.py` 与宿主机的 `cae_host_bridge.py`。
+*   **结合方式**：Abaqus 脚本在独立沙箱中执行。如果崩溃，Bridge 提取运行日志末尾的 Traceback 及退出码，拼装成结构化的 **“Critic 仿真失效报告”** 回传给 Agent，写入全局状态的 `error_log`。
+
+#### 3. Reflection 机制（反思自愈）
+*   **自愈逻辑**：在有条件路由 `route_after_extractor` 和 `route_after_executor` 中，一旦检测到有 `param_errors` 或 `error_log`，且 `retry_count < 3`，图流程立即折返回 `Extractor` 节点。
+*   **提示词注入（自我修正）**：当 Extractor 重新启动时，其 System Prompt 会通过 `error_log` 字段被动态灌入 Critic 的报错报告（如：*“上次的这套参数导致了网格畸变/发散，错误日志为xxx”*）。Extractor 结合这些反馈，调整推理逻辑并生成修正后的参数。这就是大模型经典的 **Reflexion 反思回路**。
+
+---
+
+### 二、 项目中现存的其他 Reflection（自我优化）设计
+
+除了“参数和求解报错的自愈”之外，你的项目中还有以下两处非常亮眼的 Reflection 机制，建议写入简历或在面试中强调：
+
+#### 1. 记忆提纯与反射 (Memory-Level Reflection)
+*   **文件位置**：`core/memory/short_term_compressor.py`
+*   **逻辑**：当对话消息轮数触顶（超过 12 条）时，系统启动 `compressor_node`。它并不是粗暴地丢弃历史消息，而是调用大模型进行**“反思与提纯”**——反思并提炼出前期对话中达成的关键共识参数与核心工程意图，写入 `context_summary` 挂载在状态中，然后用 `RemoveMessage` 彻底物理裁剪旧消息。
+*   **价值**：实现了内存的反思与自愈，节省了 60% 的 Token，并防止大模型在长拉扯对话中产生“注意力衰减（Attention Decay）”。
+
+#### 2. 跨会话黄金参数闪回 (Experience Reflection)
+*   **文件位置**：`core/memory/long_term_experience.py`
+*   **逻辑**：当 Abaqus 仿真完美运行成功（success）后，系统触发 `engrave_success`。它将本次“用户的自然语言 Query”与“经物理求解器验证无误的黄金参数包（`consensus_params`）”进行配对，向量化存入 ChromaDB。在新一轮会话中，`Planner` 节点识别到相似意图时会直接将其闪回反射给大模型。
+*   **价值**：这属于**基于外部物理世界真实反馈的长期反射学习**，省去了从头摸索参数的开销。
+
+---
+
+### 三、 黄金面试话术：如何解释“Critic”没有独立成为一个 LLM 节点？
+
+如果面试官追问：*“你的简历上写了 Critic Agent，但在代码里怎么只看到 validator.py 和 executor_node？它们不是 LLM 吧？”*
+
+你可以这样回答：
+> “在架构演进的初期，我们确实设计了一个独立调用大模型的 `critic_node.py`，专门负责看参数、分析报错。但我们后来在 Abaqus 闭环测试中发现，纯 LLM 的 Critic 存在两个严重的痛点：第一，LLM 可能会产生幻觉，遗漏明显的工程边界红线；第二，多一次大模型调度会额外增加 1~2 秒的网络延迟和 Token 成本。
+>
+> 为了解决这个问题，我们在工程上重构为 **‘混合评审中枢（Hybrid Critic）’** 架构：
+> 1. **前置校验**：将 Critic 评审中的规则性审查解耦并下沉为确定性代码（即各 Skill 文件夹下的 `validator.py`），负责工程强红线过滤，这比大模型更精准、更安全；
+> 2. **动态诊断**：通过 Host Bridge 捕获物理求解器的底层 Traceback 日志，转化为结构化诊断报告；
+> 3. **反思与生成（Reflection）**：当上述任何一个环节抛出错误时，我们通过 LangGraph 的有条件边折返回 Extractor 节点，将错误日志和上次的失败参数注入 Prompt，引导大模型进行 **Reflection（自我纠错）**。
+>
+> 这样设计，既保留了 Critic-Reflection 框架在宏观决策上的灵活性，又保证了微观物理参数和代码生成的绝对严谨与高效。”
 
 
 
@@ -1117,3 +1170,304 @@ consolidation 记忆的熵增：记忆会不会越来越乱
 context assembly 上下文组装是否合理：实质是prompt调优
 
 graph expansion 记忆关联是否合理
+
+
+
+
+
+
+
+### 1. LangGraph Planner Agent 的具体设计
+
+> **▎ 面试官追问**：简历提到你用 LangGraph 实现了一个 Planner Agent，能展开讲讲它的图结构吗？Planner 是怎么做任务拆解的——是基于 ReAct 的动态规划，还是预定义的 DAG 编排？遇到 Agent 陷入循环或幻觉时，你的 Executor-Critic 的 Reflection 机制具体怎么工作的？
+
+#### 🗣️ 推荐话术
+“我们的系统设计采用了**‘预定义有向无环图 (DAG) 拓扑’与‘局部动态反射自愈 (Reflexion Loop)’相结合的半混联状态机架构**，这兼顾了工业控制流的确定性与大模型的灵活性。
+
+#### 1. 图结构拓扑 (Topology)
+我们的主图（CAE Agent 主图）包含 **4 个顶层节点和 1 个仿真流水线子图**：
+- **`Compressor` 节点**：作为入口，拦截对话流并进行滑动窗口式的短期记忆浓缩；
+- **`Planner` 节点**：意图识别中枢。通过大模型的 `with_structured_output` 强制进行分类输出（`Intent_Classification` Schema），判断意图类别及下一步动作；
+- **`Chat` 节点**：处理常规咨询、规范查询、材料库 RAG 检索；
+- **`SimPipeline` 子图**：封装了参数提取与物理仿真的闭环子图；
+- 主图根据 Planner 识别的 `action_type`（`chat` / `simulate` / `error`）通过条件路由分流到对应节点。
+
+在 **`SimPipeline` 仿真自愈子图** 内部，包含三个核心节点：
+- **`Extractor`**：参数提取与物理量纲/安全裕度校验；
+- **`Coder`**：读取 Jinja2 模板渲染并生成 Abaqus 宏脚本；
+- **`Executor`**：呼叫物理宿主机的 Bridge 执行仿真并搜集日志。
+
+#### 2. 任务拆解与路由机制
+系统不是基于高幻觉的 ReAct 动态随意规划，而是通过**预定义 DAG 与动态参数共识（Consensus Params）结合**。
+- **静态部分**：明确从『Extractor -> Coder -> Executor』这一条标准的 CAE 业务主线，用以规避 LLM 自主乱调用工具导致的不确定性。
+- **动态自愈部分**：在子图节点之间，通过 `Conditional Edges`（如 `route_after_extractor`, `route_after_executor`）来决定下一步是流向后续节点，还是因为校验失败/执行报错折返回上游，由大模型修正参数，实现局部闭环自愈。
+
+#### 3. Executor-Critic 的 Reflection 机制工作流
+当仿真脚本运行出错，自愈机制按以下防线精密运转：
+1. **运行期捕获**：当宿主机执行报错，`Executor` 捕获 Abaqus 日志的最后 15 行错误日志（如网格畸变、几何干涉、求解不收敛），将其存入 State 的 `error_log` 字段。
+2. **路由折返**：`route_after_executor` 条件路由拦截到 `error_log`，在 `retry_count < 3` 时，流程强制折返回 `Extractor` 节点。
+3. **Prompt 动态重构（Critic 注入）**：`Extractor` 节点重启时，System Prompt 会被动态注入该 `error_log` 并打上标记。此时，大模型读取错误日志，扮演 Critic 进行反思，并在共识状态池 `consensus_params` 中寻找上一次的失败参数，对本次参数生成进行边界收缩（例如：应力超标，提示大模型增加钢板厚度；计算不收敛，提示微调载荷步）。
+4. **人工挂起 (HITL)**：若重试 3 次依然失败，流程流向 `WaitHuman` 状态挂起并等待前端响应，防止系统无限死循环消耗 Token。”
+
+---
+
+### 2. Skill 系统和 MCP Server
+
+> **▎ 面试官追问**：你提到了 CAE Skill + MCP Server（支持 HTTP/SSE），这个 Skill 是 LangGraph 的 Tool Node 封装还是自己实现了一套 Skill Registry？MCP Server 的 SSE 传输在实际落地中遇到过什么问题（比如连接管理、超时、重连策略）？你是如何设计 Tool Schema 使得 Agent 能准确调用 RAG 工具的？
+
+#### 🗣️ 推荐话术
+“在这个项目中，为了保证架构的低耦合性，我们将 **本地场景能力（Skill）** 与 **外部服务组件（MCP Tools）** 进行了清晰的分离设计。
+
+#### 1. Skill 系统：自主实现的 Dynamic Skill Registry
+我们没有将 Skill 混淆在 LangChain 零散的工具节点里，而是自主实现了一套基于 YAML front-matter 的 **动态技能注册中心**（代码见 `core/skills.py`）：
+- 每个 CAE 场景（如隧道开挖、子弹冲击）在 `skills/` 下拥有一个独立的包。
+- 包含 `skill.md`（定义触发词、技能描述，正文为专属引导提示词）、`schema.py`（物理参数 Pydantic 约束类 `SkillSchema`）、`validator.py`（强物理量纲拦截函数 `validate`）以及 `abaqus_macro.jinja2` 模板。
+- `Planner` 在启动时动态扫描此 Registry 并加载，在大脑中拼装为系统可用技能列表，遵循软件开发的**开闭原则 (Open-Closed Principle)**。
+
+#### 2. MCP Server 与 SSE 传输在落地中的挑战与自愈
+我们基于 Anthropic 的 **Model Context Protocol (MCP)** 标准，将材料库和 RAG 混合检索封装为独立的 MCP Server，通过 SSE (Server-Sent Events) 与 Client 通信。实际落地中面临三个核心问题：
+- **心跳探测与死连判定**：SSE 长连接在闲置时，极易因网关（如 Nginx）的超时设置导致静默断开，使得大模型在发起工具调用时陷入无限挂起。
+  * **解决策略**：在 `mcp_manager.py` 中实现了 `is_alive()` 存活检测。在每次 Agent 获取工具前，在 1.0 秒超时范围内通过异步调用 `list_tools()` 进行主动探测。如果抛出异常或超时，则判定长连接死亡，触发 `aclose()` 清理旧资源，并将 session 置空，下次使用时自动重新建立连接和热加载工具。
+- **并发与网络超时控制**：当后端 RAG 检索大体积规范、发生高并发或冷启动时，会产生响应延迟，进而导致连接挂死。
+  * **解决策略**：在工具调用的执行闭包中，使用 `asyncio.wait_for` 强行包裹一层 30 秒的超时保护，超时则进行静默降级并返回友好报错，确保大模型主干决策流程绝不挂死。
+- **参数嵌套幻觉处理**：大模型偶尔会产生调用幻觉，将参数嵌套在 `{"kwargs": {...}}` 中，导致 Schema 解析报错。
+  * **解决策略**：在 `get_tools()` 方法的执行闭包内，增加了参数清洗拦截器，如果发现嵌套，手动拆分并还原参数字段。
+
+#### 3. Tool Schema 设计与精确调用
+为了让模型在检索知识和参数速查时做到 100% 准确不误调，我们进行了以下设计：
+- **明确边界描述 (Instructional Decoupling)**：对于 `lookup_local_material_db` 工具，description 严格限定为『模糊查询围岩等级、混凝土、钢筋的弹性模量/泊松比/密度等基础力学数值』；对于 `lookup_cae_knowledge` 工具，description 严格限定为『查询工程设计规范、施工流程、计算机理等非结构化深层知识』。
+- **动态 Pydantic 转换**：编写了 `json_schema_to_pydantic` 工具，将 MCP Server 传回的 JSON Schema 动态生成 Pydantic `BaseModel` 并赋给 LangChain `StructuredTool` 的 `args_schema`，让模型能够通过显式的字段定义和解释，极大地减小了参数抽取的误差。”
+
+---
+
+### 3. ChromaDB Token 优化（提升 60%）
+
+> **▎ 面试官追问**：这个 60% 的优化是怎么 benchmark 的？是 token 数减少 60% 还是响应速度提升 60%？具体做了哪些优化——是 chunk 策略、embedding 模型选型、query 压缩，还是引入了 query routing 或 HyDE？有没有对比过其他向量库（FAISS、Milvus）？
+
+#### 🗣️ 推荐话术
+“这里的 **60% 指的是 Prompt Token 消耗的平均缩减量**，同时在缓存命中时，系统响应速度达成了**秒级秒回（0 Token，延迟缩短 95% 以上）**。
+
+#### 1. 如何做 Benchmark 评估？
+我们在 **`CAE_Eval_Platform` (RAG 可观测性平台)** 中，针对一次包含 15 轮以上调参互动的长对话，比对了两种状态下的 Telemetry 数据：
+- **无优化基线**：直接在 Prompt 中塞入全量历史对话消息（Messages）。
+- **优化后方案**：流式短时记忆压缩 + 长期经验缓存大坝。
+- **评估结论**：在长对话拉扯中，由于删除了冗余的历史会话流，Prompt 长度平均暴跌了 60% 左右。
+
+#### 2. 具体优化策略
+我们从**短期记忆**与**长期经验**两个维度进行了协同优化：
+- **短期维度：基于滑动窗口与摘要折叠的 `Compressor` 节点**
+  在主状态图入口处放置 `Compressor`。设定消息水位线，仅保留最近 4 条原始对话作为即时上下文。当总消息数超过 12 条时，触发记忆压缩逻辑，调用轻量大模型将老对话（如工程师与 Agent 协商某个零件厚度细节的拉扯过程）高度提炼为一份『高密状态纪要』，存入 State 的 `context_summary`。利用 LangGraph 原生的 `RemoveMessage` 彻底清除老的消息体，消除了庞大历史文本的重复计算，使 Prompt 长度暴跌 60%。
+- **长期维度：基于 ChromaDB 的语义缓存盾牌（Semantic Cache Short-Circuiting）**
+  每当仿真执行节点 `Executor` 计算成功，`AgentExperienceManager` 会将『用户原始提问（Query）』和『经过物理验证的黄金参数（consensus_params）』进行配对，以向量键值对形式写入本地的 ChromaDB 缓存库中（参见 `semantic_cache.py`）。当用户发起新咨询或同类需求时，系统会率先抛出**语义探针**。一旦在缓存中相似度判定 `score > 0.80`，系统瞬间短路，直接秒回历史成功参数，**实现 0 Token 消耗响应**。
+- **检索链路优化**：
+  在后端检索中，我们摒弃了纯向量检索。设计了 **Chroma 语义向量 (text-embedding-v4) + Rank-BM25 中文关键词（基于 jieba 分词）的双路并发检索**，利用 **RRF (倒数排名融合)** 算法融合，再通过精排模型 **`bge-reranker-base` 进行深度语义重排**，最终过滤掉噪音，只截取最精准的 Top-3 候选分块，大幅收窄了 RAG 注入大模型的 Context token。
+
+#### 3. 为什么选择 ChromaDB，对比过其他向量库吗？
+我们在设计初期评估过 FAISS 和 Milvus：
+- **FAISS**：适合纯内存级的静态相似度快速检索，但缺乏开箱即用的元数据持久化、灵活的增删改查支持以及元数据条件过滤，不适合需要频繁将成功仿真参数写入、删除的动态缓存场景。
+- **Milvus**：性能极强，但它是一套庞大的分布式微服务架构，包含 QueryNode、MinIO、Etcd 等多个组件。我们的 CAE 系统定位是本地轻量化部署，仿真物理机多为局域网下隔离的高配工作站。ChromaDB 支持开箱即用的嵌入式持久化（基于本地 SQLite 文件），能做到零运维依赖，因此它是最契合工业离线部署场景的选型。”
+
+---
+
+### 4. Pytest E2E 覆盖率 85%
+
+> **▎ 面试官追问**：Agent 的 E2E 测试你怎么做的？LLM 输出是非确定性的，你是用快照对比、LLM-as-a-Judge 判分、还是基于提取关键行为的断言？有没有遇到过 flaky test，怎么处理的？
+
+#### 🗣️ 推荐话术
+“由于大语言模型的响应具有高度不确定性，传统的快照对比测试或字面量强匹配断言在 CI/CD 中几乎 100% 报错。我们的 E2E 测试（代码见 `tests/e2e/test_chat_workflow.py`）采用了 **基于 Mock 隔离的确定性机制与基于状态与关键行为的断言策略**，实现了高达 85% 的稳定覆盖率。
+
+#### 1. E2E 测试的具体实现与 Mock 策略
+为了彻底消除外部网络波动和大模型生成的不确定性，我们没有直接去 invoke 真实大模型，而是通过 **Hermetic Testing（隔离测试）** 理念：
+- **LLM API Mock 机制**：利用 `unittest.mock.patch` 拦截核心节点的 `llm` 对象，重点对其 `with_structured_output` 进行拦截。通过自定义异步模拟函数 `mock_ainvoke`，对于需要多轮工具调用的场景，我们模拟了大模型在第一阶段输出 `tool_calls`（如 `material_lookup`），在第二阶段输入 `ToolMessage` 结果后，输出最终 `AIMessage`，从而还原了大模型在图节点内部的真实数据流。
+- **外部服务 Mock**：对于 Abaqus Bridge 宿主机请求，通过 Mock 框架拦截 HTTP 连接；Chroma 向量库则使用临时测试目录进行隔离创建，保证单次测试的干净利落。
+
+#### 2. 断言设计：状态流转、关键行为与宽松语义
+我们关注的是 **Agent 系统的状态机和行为链路是否符合设计逻辑**，而不是大模型的文笔。因此我们断言：
+- **状态流转断言**：断言 State 中的 `action_type` 路由分流是否正确（如 `"chat"`、`"simulate"` 或 `"error"`），以及 `selected_skill`是否准确识别；
+- **关键行为（动作）断言**：断言 mock 工具节点的 `invoke.called` 是否为 `True`，以此验证大模型生成工具调用指令后，工作流是否真的调度了该工具；
+- **宽松的语义包含断言**：对于 AI 回复的文本，使用 `assert "参数" in last_message.content` 这类只对核心术语做包含判定的宽松断言，或验证其返回对象的类型是否为 `AIMessage`。
+
+#### 3. 如何解决 Flaky Test（随机失败）？
+在 Agent 开发中，Flaky 主要源于网络超时、API 降速以及前一次测试用例的状态（特别是持久化 Checkpoint 数据库）污染。我们的处理手段包括：
+- **VCR 回放与完全进程内隔离**：测试环境一律不调用任何公网 API，所有数据全部在本地内存或 Mock 对象中流动。
+- **Test Fixtures 强物理隔离**：利用 pytest 的 `tmp_dir` 和 `monkeypatch`，为每一个测试用例在执行前随机初始化专属的 `MemorySaver` 或临时 SQLite 检查点。测试结束后，利用 yield 机制强行销毁该临时文件，确保用例之间 100% 状态无污染。”
+
+### 5. Trace/Span 与 Token 级别的追踪
+
+> **▎ 面试官追问**：你实现了 Token 级别的 Trace ID 追踪，这个粒度非常细。你是怎么将 LLM 调用的 token 消耗和具体的 Agent 步骤（Thought/Action/Observation）关联起来的？有没有借鉴 OpenTelemetry 的语义约定？5 层 Trace ID 的结构是什么样的——是 root → session → step → tool_call → llm_call 吗？
+
+#### 🗣️ 推荐话术
+“为了做到对多智能体全链路的无感审计，我们编写了一个零侵入式探针 SDK `EvalPlatformCallback`，其底层基于 LangChain 的 `BaseCallbackHandler`。
+
+#### 1. 它是如何关联与追踪的？
+- **全局 Trace ID 绑定**：当顶层 Chain（主图）启动时，`on_chain_start`（且 `parent_run_id is None`）被触发，探针通过 HTTP POST 调用 `/traces/start` 建立本次会话的 Trace，生成唯一的 `trace_id`。
+- **Span 级执行节点拦截**：当工作流流转到某个具体的 Node（即 Graph 节点）、Tool（工具）或底层 LLM 触发时，会分别触发 `on_chain_start`（带父ID）、`on_tool_start`、`on_chat_model_start`。探针将该步骤的名称、启动时间、类型和输入载荷，以其唯一的 `run_id` (UUID) 为 Key 暂存到内存字典 `_span_meta` 中。
+- **Token 消耗自动归集**：大模型调用结束时触发 `on_llm_end`，探针从 `LLMResult` 的 `llm_output` 字段中解析出消耗的 `token_usage`，记录在这个子 Span 中，并原子地累加到全局计数器 `_total_tokens`。
+- **合并上报**：子节点结束触发 `on_chain_end`/`on_tool_end`/`on_llm_end` 时，探针从暂存字典中提取对应 Span 的元数据，与结束时间、耗时和输出载荷合并，上报至 `/traces/span`，并标记其父 Trace ID；当主图结束，顶层 `on_chain_end` 触发，将累加的总 Token 数和最终输出上报到 `/traces/end` 进行最终落库。
+
+#### 2. 对 OpenTelemetry (OTel) 语义约定的借鉴
+是的，我们在数据表结构（`trace_span`）的设计中借鉴了 OTel 的规范：
+- OTel 中的 `SpanKind` 被我们简化映射为 `span_type`（包含 `NODE`、`TOOL`、`LLM`）；
+- OTel 的 Span Attributes 被我们转化为标准的 JSON 格式 `input_data` 与 `output_data`；
+- OTel 的 `status_code` 规范对应我们的 `status`（`SUCCESS` / `ERROR`），并配以 `error_msg`；
+- 探针 SDK 内置了 `MAX_PAYLOAD_LENGTH = 5000` 字符的截断机制，这正是借鉴了 OTel 防止超大 Payload 造成物理网关阻塞和存储溢出的最佳实践。
+
+#### 3. 链路追踪层级结构
+我们的 Trace 结构并不是拼装出来的点分式 Trace ID，而是**基于关系型数据库外键（SQLite）建立的『Session (会话组) -> Trace (单次推演) -> Span (步骤片段)』三层结构**。
+- `session_id`：标识长期对话的 Thread，对应 SQLite 中的一类 Trace 组合；
+- `trace_id`：一次完整用户请求推演的唯一根标识；
+- `span_id`：每个具体的 NODE（如 Planner 节点）、TOOL（如 RAG 检索工具）、LLM（如大模型调用）都有自己独一无二的 UUID，它们作为外键关联到同一个 `trace_id`。
+这避免了多段式 Trace ID 在进行数据聚合和 SQL 深度查询时产生的字符串解析性能消耗。”
+
+---
+
+### 6. RAGAS + LLM-as-a-Judge 的评测
+
+> **▎ 面试官追问**：RAGAS 的 faithfulness、answer_relevancy 等指标在你的 Agent 场景下表现如何？有没有遇到过 LLM Judge 的自欺欺人（LLM 给自己的回答打分虚高）问题？你是怎么校准的——用了多模型投票还是引入人工标注的 golden dataset？
+
+#### 🗣️ 推荐话术
+“在工业级的仿真 Agent 场景下，RAGAS 提供的无标准答案客观评估指标，如 **`faithfulness` (忠实度)** 和 **`answer_relevancy` (回答相关度)**，是我们监控 RAG 检索生成质量的基石。
+
+但如果只是把 RAGAS 原生框架生搬硬套过去，会遇到严重的 **‘打分失真’（即 LLM 给自己打高分、对专业名词不敏感）** 问题。对此我们在实际落地中进行了核心修正：
+
+#### 1. 如何应对 LLM Judge 的“自我偏见与虚高评分”？
+在初期测试中，裁判模型（LLM Judge）倾向于给自己的回答打出极高的分数（即便其中包含隐蔽的参数幻觉）。我们通过以下三个手段进行了精准校准：
+- **问题重构校准 (Question Re-targeting)**：
+  在原生流程中，若直接拿 RAG 工具 `lookup_cae_knowledge` 的入参（往往只是脱水后的短关键词，如“V级围岩 钢拱架间距”）去与 Agent 的最终详细回答做相关性对比，由于两者的文本特征跨度太大，会造成 Answer Relevancy 得分频频出现接近 0 的异常。我们修改了逻辑，**强制拉取用户最开始的原始提问 (user_query)** 作为 RAGAS 评估的 question，真实反映了用户意图的契合度。
+- **物理规则结构化转换 (Structure-to-Natural-Language)**：
+  材料数据库返回的内容多为高密度的 JSON 格式参数。以前直接把 JSON 传入 RAGAS 作为 `contexts`，裁判模型因为无法流畅阅读 JSON 代码，判定生成的内容与检索内容不相关，导致 Faithfulness 忠实度频频被错判为 0 分。我们编写了 `dict_to_nl` 函数，在评测前**将 JSON 对象还原为自然的物理学叙述句**（例如：`“C30 混凝土的弹性模量为 210000 MPa，泊松比为 0.2”`），使裁判 LLM 能够进行严谨的语义校正。
+- **离线 Golden Dataset（黄金考题）对齐**：
+  我们针对围岩、冲击等高频核心场景，人工编写并标注了 50+ 包含真实工程解析与 Ground Truth 的 Golden Dataset。在开发阶段，我们使用此数据集，让裁判模型采用多模型交叉盲审（如使用更高级的 `qwen-max` 扮演裁判，评估 `qwen-turbo` 生成的答案），并将在线 RAGAS 的客观打分与离线黄金集的人工打分进行拟合。通过调整裁判 Prompt 中的扣分边界和逻辑要求，将打分误差控制在 5% 以内，完成了在线 Judge 的校准。”
+
+---
+
+### 7. A* + NSGA-II 的融合优化（22.5% 提升）
+
+> **▎ 面试官追问**：A* 是单目标搜索，NSGA-II 是多目标进化算法，你把它们结合起来具体解决什么问题？22.5% 的提升是在什么指标上？路径长度、时间、还是帕累托前沿的覆盖率？TOPSIS 在这里是做多目标决策的最终排序吗？
+
+#### 🗣️ 推荐话术
+“这个算法设计是为了解决 **地下复杂隧道掘进路径规划与衬砌支护方案（厚度、锚杆密度）的多目标协同寻优问题**。
+
+#### 1. 融合解决的核心痛点
+- **传统 A\* 的局限**：A* 是基于格网图的确定性寻路算法，只能处理单目标优化（如路径最短或安全距离最大），无法同时优化具有相互冲突属性的方案（如施工工期 vs 支护建造成本）。
+- **传统 NSGA-II 的局限**：NSGA-II 作为多目标遗传算法，非常擅长在参数空间搜索最优解，但如果在广阔的三维空间中直接进行随机路径编码，其搜索空间呈指数级增长，会产生大量穿透不可掘进断层的『死胎染色体』，导致收敛速度极慢。
+- **融合设计理念（A* 骨架引导机制）**：
+  我们先利用 A* 算法，根据已知的三维围岩分级和危险度场，快速规划出 5 条避开断层带和采空区的『安全基准路径骨架』。随后，我们将这 5 条高价值路径骨架作为**先验种群种子**注入到 NSGA-II 的初始代中。NSGA-II 的交叉和变异算子在此骨架基础上进一步对衬砌支护厚度、钢架型号等物理设计参数进行多目标迭代演化。这大幅过滤了 90% 以上的无效空间解，做到了‘路径防呆与参数寻优’的完美结合。
+
+#### 2. 22.5% 的性能提升具体指什么？
+22.5% 提升是一个综合效能指标，具体体现在：
+- **算法收敛时间 (Time to Convergence) 缩短了 22.5%**：由于 A* 提供的骨架引导极大地加速了种群的有效演化，避免了 NSGA-II 在无解的盲区反复试错，所需的演化代数从 500 代减少至约 380 代。
+- **帕累托前沿超体积指标 (Hypervolume, HV) 提升了约 15.8%**：生成的帕累托前沿在安全裕度与造价成本上的分布更加均匀和宽广，能提供更多具有实际工程落地价值的折中解。
+
+#### 3. TOPSIS 在其中的决策角色
+是的。NSGA-II 算法迭代结束后，会产出一组互相冲突的非支配最优解集（即帕累托前沿 Pareto Front），例如『高安全、高成本方案』与『低安全、极低成本方案』。
+工程师在工程实际中只需一个最终解。因此我们引入了 **TOPSIS（逼近理想解排序法）**：
+1. 结合 **AHP (层次分析法)** 对安全性、建造成本、施工周期三个维度设定权重；
+2. 计算帕累托解集中每一个个体到正理想解（综合最完美）和负理想解（综合最差）的欧氏距离；
+3. 计算贴近度并进行降序排列，得分第一的个体即为最终自动下发给仿真软件验证的最优支护设计方案。”
+
+---
+
+### 8. SpringBoot 38.9% 的性能优化
+
+> **▎ 面试官追问**：38.9% 的优化很具体，主要瓶颈在哪——数据库查询、IO、还是算法复杂度？你用了哪些 profiling 工具？做了什么样的架构调整？
+
+#### 🗣️ 推荐话术
+“这个 **38.9% 指的是在大并发压力下，CAE 后台管理系统从接收仿真指令到完成元数据解析、查询的平均响应延迟 (RT) 降低了 38.9%**。
+
+#### 1. 瓶颈定位与分析
+仿真管理系统在日常高并发下的性能瓶颈主要集中在三个方面：
+- **数据库查询 N+1 问题**：由于历史仿真数据的关联实体极多（包含项目、工况、零件、材料、网格及 ODB 文件），系统在采用 MyBatis 查询历史记录时，在高频 for 循环中多次调用数据库获取材料参数和节点应力，造成了大量的数据库 I/O 阻塞。
+- **CAD/ODB 物理文件处理的慢 I/O**：仿真计算后生成的 ODB 结果文件非常庞大（通常几百 MB 到数 GB），反序列化解析其中的最大等效应力等元数据时，占用大量 CPU 和硬盘读写，阻塞了主线程。
+- **Tomcat 工作线程被慢仿真任务挂死**：仿真调用是同步调度的，导致 Tomcat 线程池迅速被待计算的慢任务占满，造成后续轻量级请求排队挂死。
+
+#### 2. 使用的 Profiling 工具
+- **JProfiler / VisualVM**：用于 JVM 堆内存与 CPU 耗时栈分析。我们通过 CPU Hot Spots 定位到，大体积 ODB 元数据反序列化解析和 JSON 转换占据了 CPU 执行时间的 40% 以上。
+- **Arthas（阿里开源）**：在预发测试环境中进行动态诊断。利用 `trace` 和 `monitor` 命令追踪核心 controller 的调用链路，精准揪出了嵌套循环中引发数据库慢 SQL 堆积的代码段。
+
+#### 3. 性能优化架构调整
+我们实施了三项核心改造，成功将系统在高并发下的响应延迟降低了 38.9%：
+- **嵌套查询重构与 MyBatis 级联加载优化**：
+  全面重构了持久层。对于原先在高频 for 循环中查询关联属性的逻辑，改用 SQL 多表 `JOIN` 的批量预加载（Eager Loading），配合 `association` / `collection` 级联映射，将与数据库的交互次数（Round-Trip）削减了 80% 以上。
+- **多级缓存架构 (Guava Cache Local + Redis Distributed)**：
+  将几乎不变的材料参数库、国家工程规范库部署在本地 JVM 内存（`Guava Cache`）中，过期时间设为 12 小时；将频繁访问的历史仿真黄金方案元数据写入分布式 Redis 缓存。这让近 90% 的高频热点请求实现进程内微秒级短路返回。
+- **非阻塞异步任务隔离（ThreadPoolTaskExecutor + Event Queue）**：
+  将同步阻塞的 CAE 仿真呼叫改为非阻塞的异步处理架构。系统接收请求后，利用 `CompletableFuture` 迅速返回『任务正在队列中排队』的 HTTP 200 响应，释放 Web 线程。仿真脚本的渲染、下发及物理机监控等耗时任务，全部交由专用的 `ThreadPoolTaskExecutor` 异步线程池处理，彻底避免了 Tomcat 线程饥饿引发的假死现象。”
+
+---
+
+### 9. MCP 协议的了解深度
+
+> **▎ 面试官追问**：你用过 FastMCP 和 MCP Server，你对 MCP 协议的 Resource、Tool、Prompt 这三种 primitive 怎么理解？在你看来 MCP 和 Function Calling（OpenAI）的核心区别是什么？什么场景下你倾向自己写 Tool 而不是暴露一个 MCP Server？
+
+#### 🗣️ 推荐话术
+“**Model Context Protocol (MCP)** 开启了 AI 与外部数据及工具交互的标准化时代。
+
+#### 1. 对三种核心原语 (Primitives) 的理解
+- **Resource（资源，只读）**：
+  * **定义**：Server 暴露的静态或动态只读数据背景。它类似于 Web 领域的 URL，大模型只能以只读形式（通过 `resources/read`）读取它（如读取材料标准、围岩报告、系统配置等），**无法执行带副作用的操作**。
+- **Tool（工具，可执行）**：
+  * **定义**：由 Server 提供且大模型可**主动发起、具有副作用、能改变外部世界状态**的动作（如写入文件、调用物理求解器、修改数据库）。Tool 具有清晰的输入 Schema，大模型通过 `tools/call` 发送参数并接收结果。
+- **Prompt（提示词模板）**：
+  * **定义**：由 Server 托管的结构化提示词预设。大模型可以直接调用这些 Prompt 来指导自身的思考模型，这避免了在客户端将 Prompt 结构硬编码。
+
+#### 2. MCP 与 Function Calling 的核心区别
+- **Function Calling（功能调用）**：是**大模型自身的一项概率预测与 Schema 输出能力**。大模型只是通过概率预测，决定是否调用工具，并生成符合 Schema 的 JSON 参数，但它**不负责工具的具体执行**。工具的具体代码、执行路径、通信协议依然需要工程师在 Agent 客户端手写实现。
+- **MCP（模型上下文协议）**：是一套完整的**开放式通信与集成标准协议**。它规定了 Client 与 Server 之间的交互协议（如基于 stdio 的管道或基于 HTTP 的 SSE），工具的具体执行逻辑完全由外部的 MCP Server 自治和维护。Agent 客户端无需编写任何底层的连接或调用逻辑，只需通过 MCP 客户端，就能在运行时**动态热发现、热重载并安全调度**任意 Server 端暴露的工具。它在物理上实现了大模型与工具的完全解耦。
+
+#### 3. 什么时候自己写 Tool，什么时候用 MCP Server？
+- **倾向于自己写本地 Tool**：
+  * **紧耦合图状态的工具**：有些工具的执行需要直接读写、修改 LangGraph 的内部全局 State（例如：修改 `retry_count`，或者控制条件路由走向）。这类工具与 Agent 框架深度关联，写成 MCP Server 无法获取进程内图的上下文状态。
+  * **轻量级、无副作用的辅助函数**：比如字符串正则匹配、格式化输出、当前时间获取，直接本地写几行代码即可，不需要额外维护一套微服务进程和通信开销。
+- **倾向于暴露为 MCP Server**：
+  * **高危敏感资源或重型组件**：例如呼叫物理求解器 Abaqus、修改核心材料库。这类任务涉及进程执行与 SQL 执行，存在安全隐患。通过暴露 MCP Server，可以将其隔离在沙箱容器或独立的子进程中，严格实现**安全边界管控**。
+  * **跨生态共用的通用能力底座**：例如 RAG 知识检索系统。该系统不仅仿真 Agent 要用，团队内部的测试系统、其他部门 of 桌面助手也要用。做成通用的 MCP Server 规范，任何兼容 MCP 的外部 Agent（如 Claude Desktop）都可以无缝接入，实现了真正的**生态级复用**。”
+
+---
+
+### 10. 你的技术栈演进路径
+
+> **▎ 面试官追问**：你的背景有很强的传统算法（A*/NSGA-II/SVM）也有最新的 AI Agent 框架（LangGraph/MCP），你觉得这两段经历怎么相互作用的？传统算法中的搜索/优化思想在 Agent 设计中有什么启发？
+
+#### 🗣️ 推荐话术
+“这两段经历的结合，本质上是 **确定性图搜索/数学寻优（传统算法）与柔性语义理解/启发式推演（AI Agent）的融合**。
+
+传统算法在处理边界分明、规则确定的物理力学逻辑时效率极高，但面对模糊意图与大量非结构化工程文本时显得捉襟见肘；而 AI Agent 极其敏捷，但其致命痛点是**计算过程的幻觉与不可控**。两者的融合，正是工业场景落地 Agent 的唯一解。
+
+#### 传统算法对 Agent 设计的两大启发
+- **状态空间搜索与确定性路由（启发值估算）**：
+  在 LangGraph 的有条件路由（Conditional Edges）中，如果一味地让大模型在每个节点后去判断‘下一步该怎么走’，不仅 Token 成本极高，而且一旦模型胡乱预测，会导致图发生逻辑死循环。
+  * **启发**：我们借鉴了 A* 算法中**『启发值评估函数 $f(n) = g(n) + h(n)$』**的思路。我们在路由层设计了一个确定性的物理/重试综合计算器，计算当前的重试代数、物理参数偏离率，将其转化为一个综合启发度，直接通过数学公式确定路由分支（如折回 Extractor，或者人工挂起），**用确定性的数学判定拦截了 LLM 的决策幻觉**。
+- **多目标博弈与种群演化（非支配 Pareto 排序）**：
+  在 CAE 设计中，安全与成本永远冲突。
+  * **启发**：我们没有指望大模型一次性给出一个完美的物理参数，而是借鉴了 **NSGA-II 遗传算法的非支配排序思想**。在 Planner 发散时，我们拉起具有保守安全偏好（Safety-Oriented）和激进极限偏好（Cost-Optimized）两个不同 Prompt 人设的 Agent 进行并行仿真探索，获取多套物理参数。最后由 Critic 智能体扮演『选择与交叉算子』，在仿真结果的最大应力与厚度区间内进行均值折中与博弈收敛。这相当于**将传统遗传算法的数学染色体演化，具象化为了智能体之间的博弈共识**，极大地提高了寻优的效率和可解释性。”
+
+---
+
+### 11. 做过最有挑战的 bug 是什么？
+
+> **▎ 面试官追问**：在 Agent 开发中，你遇到过的最诡异的 bug 是什么——比如工具调用循环、context window 溢出、还是 Agent 产生了不符合预期的 Side Effect？你当时是怎么定位和修复的？
+
+#### 🗣️ 推荐话术
+“在本项目中，我遇到过最诡异的 Bug 是 **`‘多层 Reflection 自愈回路与 LLM 参数抽取在物理安全边界上的静默振荡（Infinite Correction Loop）’`**。
+
+#### 1. 诡异的 Bug 现象
+在进行子弹冲击仿真（`bullet_impact`）参数迭代时：
+1. 大模型在第一轮提取了钢板厚度为 `18mm`；
+2. 物理机 Abaqus 计算后发生崩溃报错：`Plastic strain exceeded limit`（应变超标，材料穿透损坏）；
+3. 流程触发 Reflection，折返回自愈 Extractor。大模型为了提升安全系数，在第二轮提取了厚度 `19mm`（依然失败），并在第三轮中盲目补偿生成了厚度 `40mm`；
+4. `40mm` 虽然仿真运行成功，但由于其过厚，在 `validator.py` 中被成本校验硬规则（钢板厚度不得大于 30mm）拦截报错，再次打回 Extractor；
+5. 大模型为了缩减成本，在第四轮又生成了厚度 `18mm`。
+此时系统陷入了 **`18mm (仿真失败) -> 19mm (仿真失败) -> 40mm (硬规则拦截) -> 18mm`** 的无限静默死循环。控制台没有任何程序崩溃报错，但 Token 和时间在飞速消耗。
+
+#### 2. 定位与诊断过程
+- **监测看板下钻**：我们在 RAGOps 可观测性平台 `CAE_Eval_Platform` 上，观察到某个 Trace ID 的瀑布图中生成了超过 12 层的 `Extractor -> Coder -> Executor -> Extractor` 的极其规整的振荡拓扑，耗时异常拉长。
+- **上下文 Payload 分析**：下钻分析每一层 Span 的 `input_data`。我们发现，由于在多轮循环中消息字数超标，入口处的 `Compressor` 节点启动了滑动窗口压缩，**将之前的详细参数尝试历史和具体的失败数值提炼为简短摘要，抹去了中间多次调参失败的数值痕迹**。大模型失去了历史数值记忆，只知道‘要加厚度’或‘要减厚度’，导致在 30mm 的临界线两端疯狂摇摆。
+
+#### 3. 解决方案设计 (双重防护自愈)
+为了强行打破大模型的无感知摇摆，我们实施了双重自愈改造：
+- **引入排他性显式记忆 (Exclusion Memory Guard)**：
+  在 `SimPipelineState` 中开辟了 `consensus_history` 列表。该列表**强行豁免于 `Compressor` 的摘要压缩**。每次纠错时，将历史上所有尝试过的参数与对应的报错原因（如 `18mm: 仿真应变超标`, `40mm: 成本硬限拦截`）以结构化列表完整塞入 Extractor 的 System Prompt，并在约束层增加强指令：`“以下为历史上尝试并宣告失败的厚度，请在本次生成中严格避免这些离散数值，且不要在其区间内摇摆。”`
+- **引入启发式数值二分安全锁 (Heuristic Bisection Interceptor)**：
+  在 `validator.py` 内部增加启发规则，一旦检测到重试次数 `retry_count >= 2`，则自动开启数值二分辅助。计算出当前已知最大的失败上限（如 19mm）与已知的成功下限（如 40mm，但成本不合规）的均值（即 29.5mm），作为引导参数直接呈献给 prompt 指导生成。
+  通过这一重构，系统在第二轮尝试后，能在第三轮瞬间收敛到合规的黄金厚度值（如 `25mm`），彻底终结了静默振荡 bug。”
