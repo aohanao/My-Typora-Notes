@@ -1970,6 +1970,228 @@ CAE 仿真系统在工业界（如中铁、中交等大院）落地时，由于�
 
 
 
+---
+
+# CAE Agent 评测与可观测性（Eval & Ops）全景技术报告
+
+## 一、整体架构与技术选型（基于什么实现的）
+
+系统采用 **“业务执行解耦 ➔ 零侵入链路追踪 ➔ 三层立体评估 ➔ 工业级闭环治理”** 的架构思想。
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        1. 业务执行层 (CAE Agent)                        │
+│   • LangGraph 状态机编排 (Compressor ➔ Planner ➔ Extractor ➔ Coder ➔ Executor) │
+│   • Reflexion 反思重试机制 (Critic 节点把关，物理断言失败回流自修正)       │
+│   • 兼容阿里百炼 DashScope (Qwen-Turbo/Plus/Max)                          │
+└────────────────────────────────────────────────────────────────────────┘
+                                    │ 自动生命周期事件 (Hooks)
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                       2. 零侵入分布式追踪层 (Tracing)                   │
+│   • LangChain BaseCallbackHandler (EvalPlatformCallback 探针)          │
+│   • LangSmith @traceable 装饰器 / Langfuse CallbackHandler             │
+│   • 截断保护 (>5000字符) + 网络异常静默降级 (不影响仿真主业务)         │
+└────────────────────────────────────────────────────────────────────────┘
+                    │                                    │
+       HTTP 异步推送 │ 内部数据流              HTTP 异步推送 │
+                    ▼                                    ▼
+┌─────────────────────────────────────┐  ┌───────────────────────────────┐
+│   3. 自研工业中枢 (CAE_Eval_Platform) │  │ 4. 标准商用平台 (LangSmith / Langfuse)│
+│ • FastAPI 采集端 (8001端口)          │  │ • 环境变量极速激活                   │
+│ • SQLite 三表事实库 (traces.db)      │  │ • 树状执行拓扑图 + 耗时瀑布流        │
+│ • 极客暗黑科技大盘 (Vue + Chart.js) │  │ • A/B 实验对比与自动化回归测试      │
+│ • RCA 根因分析与沙箱自愈智能体       │  │ • 黄金测试集沉淀 (Add to Dataset)   │
+│ 【优势: 数据物理合规、内网完全私有】 │  │ 【优势: 开箱即用、高阶分析过滤】    │
+└─────────────────────────────────────┘  └───────────────────────────────┘
+```
+
+### 核心技术栈
+
+* **状态机与编排**：`LangGraph` + `LangChain`（有向状态图、循环反思）。
+* **链路采集**：`BaseCallbackHandler`（生命周期监听） + `@traceable`（轻量函数级追踪）。
+* **评测工具链**：`RAGAS`（RAG 质检） + `LLM-as-a-Judge`（大模型裁判） + `Pydantic`（结构化约束）。
+* **存储与看板**：`FastAPI` + `SQLite3` + `Chart.js`（本地端）；`LangSmith SaaS`（云端对比）。
+
+---
+
+## 二、评测整体工作流（Workflow 怎么运转的）
+
+一次请求从输入到可视化大盘，经历以下 5 个时序阶段：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as CAE 工程师 (User)
+    participant A as LangGraph 状态机
+    participant C as Callback 回调器 (探针)
+    participant DB as 存储中心 (Traces DB / LangSmith)
+    participant E as 评测引擎 (Evaluator)
+    participant H as 自愈智能体 (Healing Agent)
+
+    Note over U, A: ── 阶段 1: 请求启动与 Root Trace 分配 ──
+    U->>A: 输入提问（如：45号钢圆柱体受 450m/s 冲击变形）
+    A->>C: on_chain_start (顶层)
+    C->>DB: 注册 Root Trace，生成唯一 trace_id (run_id)
+
+    Note over A, C: ── 阶段 2: 节点流转与单跳性能采集 (Waterfall) ──
+    loop 遍历各节点 (Compressor / Planner / Extractor / Coder / Executor)
+        A->>C: on_node_start / on_tool_start
+        C->>C: 记录 start_time, input 参数
+        A->>A: 执行大模型推理 / Abaqus 沙箱运算
+        A->>C: on_node_end / on_tool_end
+        C->>C: 记录 end_time, output 数据, 计算节点耗时 (Latency)
+        C->>DB: 异步上报 Span 节点详情
+    end
+    A-->>U: 返回仿真应力结果 (684.2 MPa, 未贯穿)
+
+    Note over DB, E: ── 阶段 3: 自动化多维评测打分 ──
+    DB->>E: 拉取已完成且未打分的 Trace (带完整输入输出)
+    E->>E: L1 规则打分: 算耗时阶梯、查退出码、查 TDD 断言
+    E->>E: L2 LLM 裁判打分: 调独立 Qwen-Max 评判意图、参数与工程安全性
+    E->>E: L3 RAGAS 质检: 若调了 RAG 工具，自动算 Faithfulness
+    E->>DB: create_feedback() 将分数关联挂载到该 trace_id 上
+
+    Note over DB, H: ── 阶段 4: 异常捕获与自愈闭环 ──
+    opt 当 status == 'ERROR' 或 评分 < 0.6
+        DB->>H: 捕获 Bad Case 异常堆栈
+        H->>H: RCA 根因诊断 ➔ 生成修复补丁 ➔ 沙箱回归验证
+    end
+```
+
+---
+
+## 三、评测思路与技术细节（分数怎么来的）
+
+评测遵循**由硬到软、由客观到主观、分层解耦**的设计理念：
+
+### 1. L0 层：CAE 物理硬断言（Simulation-TDD）
+
+* **所在模块**：`CriticParams`、`CriticCode`、`CriticResult` 节点。
+* **判定逻辑**：纯代码断言（Assert），不依赖大模型。
+  * 材料刚度是否落在物理区间：$180\,\text{GPa} \le E \le 230\,\text{GPa}$；
+  * 泊松比物理界限：$0.2 \le \nu \le 0.35$；
+  * 仿真网格能量守恒检查：沙箱执行后人造伪应变能（ALLAE）不得超过总内能（ALLIE）的 5%。
+* **作用**：断言失败直接在 LangGraph 内触发 **Reflexion 循环回流重试**（最多 3 轮）。
+
+### 2. L1 层：客观规则评估（Rule-based，0 LLM 成本，秒级出分）
+
+* **`rule_success`**：整条链路是否正常跑通（10分 / 0分）。
+
+* **`rule_latency`（时延评分）**：
+  $$
+  \text{Score} = \begin{cases} 
+  10.0 & \text{耗时 } t \le 15\text{s} \\
+  10.0 - 4.0 \times \frac{t - 15}{15} & 15\text{s} < t \le 30\text{s} \\
+  \max(0.0, 6.0 - \frac{t - 30}{10}) & t > 30\text{s}
+  \end{cases}
+  $$
+  
+
+* **`rule_tool_count`**：工具调用合理性（$\le 5$ 次满分，$>10$ 次重罚扣分，严防 Agent 死循环空转）。
+
+* **`rule_error_free`**：整个调用链中报错 Span 的占比。
+
+### 3. L2 层：LLM-as-a-Judge 多维语义裁判（带锚点打分）
+
+* **配置策略**：采用独立、更高能力的模型（如 `qwen-max`），设为零温（`temperature=0.0`），通过 `with_structured_output` 强制要求输出 JSON 格式。
+* **五维带锚点打分（0-10 分）**：
+  1. **意图理解准确性 (`intent_score`)**：
+     * *9-10分*：完全精准命中冲击仿真，有歧义时能主动反问澄清；
+     * *0-3分*：严重偏差，答非所问。
+  2. **工具调用合理性 (`tool_call_score`)**：
+     * **重点拦截工具幻觉**：是否调用了不存在的工具？是否多传、漏传关键参数？
+  3. **专业方案质量 (`solution_score`)**：
+     * 生成的网格尺寸、边界约束、时间步长是否专业可落地。
+  4. **专业工程安全性 (`safety_score` - 核心工业指标)**：
+     * **严防危险工程建议**：如果 Agent 给出了荒谬的物理参数可能导致现实生产或实验事故（如材料强度虚标、爆炸载荷被低估），直接判 0-3 分并不允许上线。
+  5. **综合加权得分 (`composite_score`)**：
+     * 裁判模型综合权衡上述表现（而非简单算术平均），同时产出 `strengths`（亮点）与 `weaknesses`（不足）。
+
+### 4. L3 层：RAGAS 框架专项质检（RAG 检索质量）
+
+* 当 Trace 中检测到调用了 `lookup_cae_knowledge` 时触发；
+* 自动把结构化 JSON 转化为自然语言（防止 Ragas 误判），组装 `(Question, Contexts, Answer)` 三元组：
+  * **`faithfulness`（忠实度）**：回答是否严格基于检索到的论文与手册，有无模型凭空捏造；
+  * **`answer_relevancy`（相关度）**：回答是否真正切中了工程师提问的核心痛点。
+
+---
+
+## 四、Bad Case 收集与工程迭代闭环（如何持续优化）
+
+评测的最终目的是**指导系统迭代进化**，而不是打完分就结束。体系通过**“线上自动捕获 ➔ 自动化自愈 ➔ 黄金用例回灌 ➔ 离线防退化回归”**建立数据飞轮：
+
+```mermaid
+graph LR
+    Trace[线上实时 Traces] -->|筛选: Error=True 或 Score < 0.7| BadCase[Bad Case 蓄水池]
+    
+    subgraph "自愈与修复 (Healing Loop)"
+        BadCase --> RCA[healing_agent.py<br/>根因分析 RCA]
+        RCA --> SandboxFix[沙箱自动修补测试]
+    end
+
+    subgraph "数据飞轮 (Data Flywheel)"
+        BadCase --> Clean[数据清洗 & 专家标注]
+        Clean --> GoldenDS[黄金测试集 Golden Dataset<br/>eval_dataset.json]
+    end
+
+    subgraph "防退化门禁 (Regression Gate)"
+        GoldenDS --> OfflineEval[离线批处理评测]
+        OfflineEval --> CheckBase{对比 Baseline<br/>退化率 > 5%?}
+        CheckBase -->|YES: 阻断上线| Reject[告警拦截并修复]
+        CheckBase -->|NO: 通过| Release[安全发布上线]
+        Release -. 更新基线 .-> Baseline[(baseline_report.json)]
+    end
+```
+
+### 1. 自动化过滤与捕获 Bad Case
+
+通过后台定时扫描或流式监听，满足任一条件的 Trace 自动打上标签进入 Bad Case 库：
+
+* **运行时错误**：`trace_span.status == 'ERROR'`（Python 语法异常、Abaqus 求解器不收敛、API 超时）；
+* **质检未达标**：`composite_score < 0.7` 或 `safety_score < 0.6`；
+* **死循环空转**：单次请求中工具调用轮数超过 10 轮。
+
+### 2. 自愈智能体（Healing Agent）的自动化闭环
+
+* **抓取**：[`healing_agent.py`](file:///d:/GitHub/My-job/CAE_Eval_Platform/healing_agent.py) 定时抓取崩溃案例；
+* **RCA 根因分析**：LLM 读取错误调用栈，判定是“参数超出求解器边界”、“Jinja2 模板缩进错误”还是“Abaqus Python API 弃用”；
+* **沙箱回归**：在独立沙箱生成修复补丁并重跑。若生成绿灯结果，输出修改建议。
+
+### 3. 黄金测试集沉淀与防退化基线回归（Regression Testing）
+
+* **测试集沉淀**：把线上发现的典型 Bad Case 脱敏后，补充标准答案（Ground Truth），入库到 [`eval_dataset.json`](file:///d:/GitHub/My-job/CAE_RAG_project/evaluate/eval_dataset.json)（当前已精选了论文公式推导、材料参数对应表等高难度细节题）。
+
+* **发布前基线比对（Regression Gate）**：
+
+  * 系统固化一份标准基线报告 [`baseline_report.json`](file:///d:/GitHub/My-job/CAE_RAG_project/evaluate/baseline_report.json)；
+
+  * 每当工程师**改动了 Prompt、调整了技能路由规则、或者换了大模型版本**，在上线前必须执行离线全量跑批；
+
+  * 代码内嵌检测逻辑：
+
+    ```python
+    def check_regression_against_baseline(current_report, threshold=0.05):
+        # 只要忠实度、相关度、任务成功率相比 Baseline 下降超过 5%，自动抛出异常阻断发布！
+    ```
+
+---
+
+## 五、工业落地洞察：自研中枢 vs LangSmith / Langfuse
+
+| 维度                | 自研 `CAE_Eval_Platform`                       | LangSmith (SaaS 版)                         | Langfuse (开源/Cloud 版)                    |
+| :------------------ | :--------------------------------------------- | :------------------------------------------ | :------------------------------------------ |
+| **部署模式**        | **完全内网私有化（FastAPI + SQLite）**         | 海外公有云 SaaS（企业版私有化极昂贵）       | 支持 Docker 本地私有化 / 云端 SaaS          |
+| **数据安全性**      | **最高**（CAD/CAE 敏感工程模型不出内网）       | 较低（工业敏感数据上传海外有合规风险）      | 本地部署时最高；云端时需合规审查            |
+| **成本与额度**      | **100% 免费无限制**                            | 免费版仅 5,000 Trace/月，超出较贵           | 免费版 50,000 Obs/月；自建永久免费          |
+| **业务深度适配**    | **极高**（集成仿真 TDD、物理断言、自愈 Agent） | 通用大盘（需通过 API 外挂才能支持）         | 通用大盘（支持自定义评分与 Datasets）       |
+| **UI 与交互成熟度** | 轻量 Vue/Chart.js 暗黑大盘（满足监控核心需求） | **顶尖**（强大的拓扑展示、Playground 调试） | **优秀**（成熟的 Trace/Session/Score 看板） |
+
+### 最佳工程实践方案
+
+1. **日常开发与内网生产环境**：以 **`CAE_Eval_Platform`** 为核心中枢，守住内网安全底线，运行物理规则硬质检与自愈闭环；
+2. **算法实验与能力对标（Demo）**：利用 LangChain 天然兼容性，通过配置环境变量或轻量探针，一键开启 **LangSmith / Langfuse** 进行可视化的拓扑分析、延迟定位与展示汇报。
+
 
 
 针对您在面试准备和技术复盘中发现缺失的两个核心关键细节——**「长期记忆的 TTL 与低置信度淘汰机制」** 和 **「MCP Streamable HTTP 的横向对比与实现细节」**，下面为您进行体系化、工业级深度的技术拆解与面试话术补全。
