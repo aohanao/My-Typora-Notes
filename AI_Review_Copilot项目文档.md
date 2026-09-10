@@ -721,13 +721,13 @@ celery -A backend worker -Q <queue_name> -P gevent -c 100 -l INFO
 
 ### 超时兜底机制
 
-![image-20260904112903040](C:\Users\MAH\AppData\Roaming\Typora\typora-user-images\image-20260904112903040.png)
+![image-20260904112903040](AI_Review_Copilot项目文档.assets/image-20260904112903040.png)
 
-![image-20260904113325834](C:\Users\MAH\AppData\Roaming\Typora\typora-user-images\image-20260904113325834.png)
+![image-20260904113325834](AI_Review_Copilot项目文档.assets/image-20260904113325834.png)
 
 ### SSE
 
-![image-20260904114322056](C:\Users\MAH\AppData\Roaming\Typora\typora-user-images\image-20260904114322056.png)
+![image-20260904114322056](AI_Review_Copilot项目文档.assets/image-20260904114322056.png)
 
 #### A. 为什么选 Redis Streams 而不是别的
 
@@ -740,7 +740,7 @@ celery -A backend worker -Q <queue_name> -P gevent -c 100 -l INFO
 
 一句话：**SSE 负责 "传输协议"（HTTP 长连接 + 事件格式），Redis Streams 负责 "消息中转 + 断线补发"（XREAD 游标 + expire 清理）**，两者配合实现了 "意见一条生成一条推送、断线不丢、完成自动断开" 的流式体验。
 
-![image-20260904120308321](C:\Users\MAH\AppData\Roaming\Typora\typora-user-images\image-20260904120308321.png)
+![image-20260904120308321](AI_Review_Copilot项目文档.assets/image-20260904120308321.png)
 
 #### B. 那为什么本项目用 HTTP + SSE 而不是 WebSocket？
 
@@ -1629,7 +1629,7 @@ python eval/utils/clear_langfuse.py
 
 ## 二、五层结构图
 
-![image-20260906160602020](C:\Users\MAH\AppData\Roaming\Typora\typora-user-images\image-20260906160602020.png)
+![image-20260906160602020](AI_Review_Copilot项目文档.assets/image-20260906160602020.png)
 
 ------
 
@@ -2294,7 +2294,7 @@ score = 10 × 条款树相关（规则关联条款 ∈ 当前任务勾选的条�
 
 ### 二、流程总览
 
-![image-20260906120906510](C:\Users\MAH\AppData\Roaming\Typora\typora-user-images\image-20260906120906510.png)
+![image-20260906120906510](AI_Review_Copilot项目文档.assets/image-20260906120906510.png)
 
 ------
 
@@ -2367,7 +2367,7 @@ TP 判定三条件全满足才计 1 个 TP：① 章节号与黄金条款**字�
 
 L1–L5 十个"越大越好"型指标的门禁线与实测值对比（数据均出自文档）：
 
-![image-20260906120829402](C:\Users\MAH\AppData\Roaming\Typora\typora-user-images\image-20260906120829402.png)
+![image-20260906120829402](AI_Review_Copilot项目文档.assets/image-20260906120829402.png)
 
 > 要点：十项门禁全部达标且有余量；差距最小的是 L3 引用核验率（98.0% vs 门禁 98%）——它也是项目最强调的"绝杀引文幻觉"红线；L4 线上采纳率 72% 距离门禁 70% 余量最小，是知识沉淀体系持续发力的观察点。
 
@@ -2801,7 +2801,7 @@ gen = generate_comments(
 ---
 
 #### 4. 二次评审端到端延迟降低 70%+（L5 / Cache Replay 增量回放）
-![image-20260904123451275](C:\Users\MAH\AppData\Roaming\Typora\typora-user-images\image-20260904123451275.png)
+![image-20260904123451275](AI_Review_Copilot项目文档.assets/image-20260904123451275.png)
 
 ---
 
